@@ -103,6 +103,7 @@ Exit codes: claude's own code, or `2` for a key or input problem, `3` when calle
 - **Running sessions don't pick up the rule.** Sessions read `~/.claude/CLAUDE.md` when they start, so sessions that were already running have to be told.
 - **Prompt caching is automatic.** Claude Code caches the system prompt and context on its own (a test worker read about 20k of its tokens from cache), so there is nothing to configure.
 - **Tested so far:**
+  - end to end on Windows 11: a fresh Claude Code session, given only "Install <url> in always mode, don't ask again" in a sandboxed profile, installed everything, listed the keys masked (a valid one, plus a planted revoked one flagged invalid), stored nothing itself, and handed back the `-From <fingerprint>` command;
   - Windows 11 with Windows PowerShell 5.1, against the real API;
   - the bash scripts under Ubuntu (WSL) and Git Bash, with a stub `claude` (`tests/`).
   - macOS should work (bash 3.2 compatible, `shasum` fallback) but hasn't been tested yet. Reports are welcome.
