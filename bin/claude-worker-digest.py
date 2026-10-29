@@ -2,7 +2,8 @@
 """Summarise a claude-worker transcript as Markdown (used by claude-worker --recover).
 
     claude-worker-digest.py <session transcript .jsonl>
-    claude-worker-digest.py --outcome <transcript .jsonl>   last API error: "error=... status=... <text>"
+    claude-worker-digest.py --outcome <transcript .jsonl> [byte offset]
+        the last assistant message after the offset, if it is an API error: "error=... status=... <text>"
 
 Reads the main transcript plus the sub-agent and workflow files Claude Code keeps next to it
 (<dir>/<session>/subagents/..., <dir>/<session>/workflows/...). Same sections as the
@@ -63,9 +64,13 @@ def contents(entry):
     return [c for c in content if isinstance(c, dict)] if isinstance(content, list) else []
 
 
-def outcome(transcript):
+def outcome(transcript, offset=0):
+    # Only what the current attempt wrote, from byte `offset` on (a resume appends to the file)
+    with open(transcript, 'rb') as f:
+        f.seek(offset)
+        tail = f.read().decode('utf-8', 'replace')
     last = None
-    for line in lines_of(transcript):
+    for line in tail.splitlines():
         if '"type":"assistant"' in line:
             last = line
     if not last or '"isApiErrorMessage":true' not in last:
@@ -224,8 +229,8 @@ def digest(transcript):
 
 
 def main(argv):
-    if len(argv) == 3 and argv[1] == '--outcome':
-        sys.stdout.write(outcome(argv[2]) + '\n')
+    if len(argv) in (3, 4) and argv[1] == '--outcome':
+        sys.stdout.write(outcome(argv[2], int(argv[3]) if len(argv) == 4 else 0) + '\n')
         return 0
     if len(argv) != 2:
         sys.stderr.write(__doc__)

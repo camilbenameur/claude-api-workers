@@ -10,7 +10,9 @@
 # with its sub-agents and workflows under <config>/projects/<dir>/<session>/. The transcript digest
 # needs python3 (claude-worker-digest.py); without it the report keeps everything else.
 
-CW_RUN_FIELDS='id name session_id cwd model fast out_file status reason detail exit_code attempts started last_start ended launcher_pid claude_pid git_root git_head'
+# stderr_offset / transcript_offset: where the current attempt starts in stderr.log and in the
+# transcript, so that a resumed attempt is judged on its own output only
+CW_RUN_FIELDS='id name session_id cwd model fast out_file status reason detail exit_code attempts started last_start last_start_epoch ended launcher_pid claude_pid git_root git_head stderr_offset transcript_offset'
 
 cw_runs_root() { printf '%s/runs' "$(cw_home)"; }
 cw_config_dir() { printf '%s' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; }
@@ -39,11 +41,14 @@ cw_run_new() {  # $1 name, $2 session id
     mkdir -p "$_root" || return 1
     if [ -n "$1" ]; then _label=$(printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-40)
     elif [ -n "$2" ]; then _label=${2:0:8}
-    else _label=run; fi
+    else _u=$(cw_uuid); _label=${_u:0:8}; fi
     R_id="$(date +%Y%m%d-%H%M%S)-$_label"
-    while [ -e "$_root/$R_id" ]; do _u=$(cw_uuid); R_id="$R_id-${_u:0:4}"; done
+    # mkdir without -p fails on an existing folder: two launches in the same second never share one
+    while ! mkdir "$_root/$R_id" 2>/dev/null; do
+        [ -d "$_root/$R_id" ] || return 1
+        _u=$(cw_uuid); R_id="$R_id-${_u:0:4}"
+    done
     R_dir="$_root/$R_id"
-    mkdir -p "$R_dir" || return 1
     R_name=$1 R_session_id=$2 R_attempts=1 R_status=running
     R_started=$(cw_now); R_last_start=$R_started
 }
@@ -94,15 +99,61 @@ cw_run_find() {
     [ -n "$_hit" ] && cw_run_load "$_hit"
 }
 
-cw_pid_alive() { case $1 in '' | *[!0-9]*) return 1 ;; esac; kill -0 "$1" 2>/dev/null; }
+# ps etime ([[dd-]hh:]mm:ss) in seconds
+cw_etime_seconds() {
+    _e=$(printf '%s' "$1" | tr -d ' '); _d=0
+    case $_e in *-*) _d=${_e%%-*}; _e=${_e#*-} ;; esac
+    _s=0
+    for _p in $(printf '%s' "$_e" | tr ':' ' '); do _s=$((_s * 60 + 10#$_p)); done
+    echo $((_d * 86400 + _s))
+}
+
+# $1 PID, $2 epoch when the run started (optional). A PID recycled by a process started after
+# the run is not ours. Without a usable ps (Git Bash), kill -0 alone decides.
+cw_pid_alive() {
+    case $1 in '' | *[!0-9]*) return 1 ;; esac
+    kill -0 "$1" 2>/dev/null || return 1
+    case ${2:-} in '' | *[!0-9]*) return 0 ;; esac
+    _et=$(ps -o etime= -p "$1" 2>/dev/null) || return 0
+    [ -n "$_et" ] || return 0
+    _age=$(cw_etime_seconds "$_et")
+    [ $(($(date +%s) - _age)) -le $(($2 + 5)) ]
+}
+
+# The JSON result line of an output file, or nothing
+cw_result_line() { [ -n "$1" ] && [ -f "$1" ] && grep '^[[:space:]]*{.*"type":"result"' "$1" | tail -n 1; }
 
 # running | orphaned (launcher gone, claude still running) | interrupted | succeeded | failed
 cw_run_state() {
     if [ "$R_status" != running ]; then printf '%s' "$R_status"
-    elif cw_pid_alive "$R_launcher_pid"; then printf running
-    elif cw_pid_alive "$R_claude_pid"; then printf orphaned
-    else printf interrupted; fi
+    elif cw_pid_alive "$R_launcher_pid" "$R_last_start_epoch"; then printf running
+    elif cw_pid_alive "$R_claude_pid" "$R_last_start_epoch"; then printf orphaned
+    else
+        # Launcher and claude are gone. If claude still finished cleanly, its result is in the output file.
+        _line=$(cw_result_line "$R_out_file")
+        case $_line in *'"is_error":false'*)
+            # run.info was last written right after claude started
+            if [ "$R_out_file" -nt "$R_dir/run.info" ]; then
+                R_status=succeeded R_detail='the launcher was lost; the result was read from the output file' R_ended=$(cw_now)
+                cw_run_save; printf succeeded; return
+            fi ;;
+        esac
+        printf interrupted
+    fi
 }
+
+# <run>/lock is a folder holding the launcher's PID while it works on the run. A lock whose
+# launcher is dead is stale and taken over.
+cw_run_lock() {
+    _lk="$R_dir/lock"
+    if ! mkdir "$_lk" 2>/dev/null; then
+        _holder=$(cat "$_lk/pid" 2>/dev/null)
+        if [ -n "$_holder" ] && cw_pid_alive "$_holder"; then return 1; fi
+        rm -rf "$_lk" && mkdir "$_lk" 2>/dev/null || return 1
+    fi
+    printf '%s' "$$" > "$_lk/pid"
+}
+cw_run_unlock() { [ -n "${R_dir:-}" ] && [ "$(cat "$R_dir/lock/pid" 2>/dev/null)" = "$$" ] && rm -rf "$R_dir/lock"; }
 
 cw_transcript() {
     [ -n "$R_session_id" ] || return 1
@@ -148,26 +199,29 @@ RULES
 # assistant message (isApiErrorMessage) and stderr. Sets O_failed (0/1), O_reason, O_detail.
 cw_run_outcome() {  # $1 exit code, $2 killed (0/1)
     _facts='' _detail='' _is_error=0
-    if [ -n "$R_out_file" ] && [ -f "$R_out_file" ]; then
-        _line=$(grep '^[[:space:]]*{.*"type":"result"' "$R_out_file" | tail -n 1)
-        if [ -n "$_line" ]; then
-            case $_line in *'"is_error":true'*) _is_error=1; _detail=$(cw_json_str result "$_line") ;; esac
-            _facts="subtype=$(cw_json_str subtype "$_line") terminal_reason=$(cw_json_str terminal_reason "$_line") api_error_status=$(cw_json_num api_error_status "$_line")"
-            [ -n "$R_session_id" ] || R_session_id=$(cw_json_str session_id "$_line")
-        fi
+    _line=$(cw_result_line "$R_out_file")
+    if [ -n "$_line" ]; then
+        _facts="subtype=$(cw_json_str subtype "$_line") terminal_reason=$(cw_json_str terminal_reason "$_line") api_error_status=$(cw_json_num api_error_status "$_line")"
+        case $_line in *'"is_error":true'*)
+            _is_error=1; _detail=$(cw_json_str result "$_line")
+            _facts="$_facts $(printf '%s' "$_detail" | tr -s '\r\n\t ' '    ' | cut -c1-400)" ;;
+        esac
+        # claude reports the session it really used (a resume or fork may change it)
+        _s=$(cw_json_str session_id "$_line"); [ -n "$_s" ] && R_session_id=$_s
     fi
+    # Only what the current attempt wrote: a resume appends to the transcript and to stderr.log
     if _t=$(cw_transcript); then
-        _last=$(grep '"type":"assistant"' "$_t" | tail -n 1)
+        _last=$(tail -c +$((${R_transcript_offset:-0} + 1)) "$_t" | grep '"type":"assistant"' | tail -n 1)
         case $_last in *'"isApiErrorMessage":true'*)
             _is_error=1
-            if _py=$(cw_python); then _e=$("$_py" "$here/claude-worker-digest.py" --outcome "$_t")
+            if _py=$(cw_python); then _e=$("$_py" "$here/claude-worker-digest.py" --outcome "$_t" "${R_transcript_offset:-0}")
             else _e="error=$(cw_json_str error "$_last") status=$(cw_json_num apiErrorStatus "$_last") $(cw_json_str text "$_last")"; fi
             _facts="$_facts $_e"
             [ -n "$_detail" ] || _detail=$(printf '%s' "$_e" | sed 's/^error=[^ ]* status=[^ ]* //') ;;
         esac
     fi
     if [ -f "$R_dir/stderr.log" ]; then
-        _tail=$(grep -v 'connectors are disabled' "$R_dir/stderr.log" | grep -v '^[[:space:]]*$' | tail -n 20)
+        _tail=$(tail -c +$((${R_stderr_offset:-0} + 1)) "$R_dir/stderr.log" | grep -v 'connectors are disabled' | grep -v '^[[:space:]]*$' | tail -n 20)
         if [ -n "$_tail" ]; then
             _facts="$_facts $(printf '%s' "$_tail" | tr '\n' ' ')"
             [ -n "$_detail" ] || _detail=$(printf '%s\n' "$_tail" | tail -n 1)

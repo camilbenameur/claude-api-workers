@@ -108,10 +108,12 @@ public static class Stub {
                 Directory.CreateDirectory(Path.Combine(sd, "workflows"));
                 File.WriteAllText(Path.Combine(Path.Combine(sd, "workflows"), "wf_stub-1.json"), "{\"runId\":\"wf_stub-1\",\"workflowName\":\"stub-fixes\",\"status\":\"running\",\"scriptPath\":\"C:\\\\s\\\\wf.js\"}");
             }
-            else { t.Append(Asst("{\"type\":\"text\",\"text\":\"done\"}")); }
+            else if (mode != "netfail") { t.Append(Asst("{\"type\":\"text\",\"text\":\"done\"}")); }
             File.AppendAllText(Path.Combine(proj, sid + ".jsonl"), t.ToString(), new UTF8Encoding(false));
         }
         if (mode == "hang") { Thread.Sleep(120000); return 0; }
+        if (mode == "netfail") { Console.Error.WriteLine("Error: connect ECONNREFUSED 1.2.3.4:443"); return 1; }
+        if (mode == "bg") { Console.Error.WriteLine("Background tasks still running 10m after the last turn (1 task); stopping them"); }
         if (mode == "credit") {
             Console.Error.WriteLine("stub warning line");
             o.WriteLine("{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"terminal_reason\":\"api_error\",\"api_error_status\":400,\"result\":\"Credit balance is too low\",\"session_id\":" + J(sid ?? "") + "}");
@@ -192,6 +194,68 @@ public static class Stub {
     Check 'resumed run is recorded'                { $job.status -eq 'succeeded' -and $job.attempts -eq '2' -and (Test-Path (Join-Path $job.dir 'resume-2.md')) }
     $runs = Invoke-Child "& '$bin\claude-worker.ps1' -Runs"
     Check '-Runs lists the runs'                   { $runs.Code -eq 0 -and $runs.Out.Contains($job.id) -and $runs.Out.Contains('succeeded') }
+
+    # --- review fixes: one attempt is judged on its own output, options and locks
+    Check '-ResumeRun refuses a succeeded run'     { (Invoke-Child "& '$bin\claude-worker.ps1' -ResumeRun job1").Code -eq 2 }
+    Check 'previous output kept per attempt'       { Test-Path (Join-Path $job.dir 'out-attempt-1.json') }
+    $lockHeld = [IO.File]::Open((Join-Path $job.dir 'lock'), 'OpenOrCreate', 'ReadWrite', 'None')
+    $lk = Invoke-Child "& '$bin\claude-worker.ps1' -ResumeRun job1 -Force -Prompt more"
+    $lockHeld.Close()
+    Check 'a locked run cannot be resumed twice'   { $lk.Code -eq 2 -and $lk.Out.Contains('another launcher') }
+    $f1 = Invoke-Child "& '$bin\claude-worker.ps1' -ResumeRun job1 -Force -Prompt more --max-turns 50 --continue"
+    Check '-Force continues a succeeded run'       { $f1.Code -eq 0 -and [IO.File]::ReadAllText("$tmp\c.json", $utf8).Contains('STDIN=more') }
+    $null = Invoke-Child "& '$bin\claude-worker.ps1' -ResumeRun job1 -Force -Prompt again"
+    $co = [IO.File]::ReadAllText("$tmp\c.json", $utf8)
+    Check 'options given on a resume are kept'     { $co.Contains('--max-turns | 50') -and $co.Contains('--output-format | json') }
+    Check 'session flags are not replayed'         { -not $co.Contains('--continue') -and ([regex]::Matches($co, '--resume')).Count -eq 1 }
+
+    $null = Invoke-Child "`$env:STUB_MODE = 'bg'; & '$bin\claude-worker.ps1' -Prompt x -Name bgjob"
+    Check 'stopped workflows count as a failure'   { (Find-RunRecord 'bgjob').reason -eq 'bg_timeout' }
+    $bgr = Invoke-Child "& '$bin\claude-worker.ps1' -ResumeRun bgjob"
+    Check 'a clean resume is not judged on old stderr' { $bgr.Code -eq 0 -and (Find-RunRecord 'bgjob').status -eq 'succeeded' -and -not $bgr.Out.Contains('failed (') }
+
+    $null = Invoke-Child "`$env:STUB_MODE = 'credit'; & '$bin\claude-worker.ps1' -Prompt x -Name netjob"
+    $nr = Invoke-Child "`$env:STUB_MODE = 'netfail'; & '$bin\claude-worker.ps1' -ResumeRun netjob"
+    Check 'a resume failing otherwise gets its own reason' { $nr.Code -eq 1 -and (Find-RunRecord 'netjob').reason -eq 'network' }
+
+    $out = Invoke-Child "[Console]::InputEncoding = New-Object Text.UTF8Encoding `$true; & '$bin\claude-worker.ps1' -Prompt 'x'"
+    Check 'no BOM even from a UTF-8 console'       { $out.Out.Contains('BOM=no') }
+
+    # npm install: claude.cmd next to node_modules\@anthropic-ai\claude-code\cli.js, node started directly
+    $shim = "$tmp\npm"
+    New-Item -ItemType Directory -Force "$shim\node_modules\@anthropic-ai\claude-code" | Out-Null
+    [IO.File]::WriteAllText("$shim\claude.cmd", "@exit /b 9`r`n")
+    [IO.File]::WriteAllText("$shim\node_modules\@anthropic-ai\claude-code\cli.js", '// stub')
+    Copy-Item "$tmp\stub\claude.exe" "$shim\node.exe"
+    $np = Invoke-Child "`$env:PATH = '$shim;' + `$env:PATH; & '$bin\claude-worker.ps1' -Prompt x -Name npmjob"
+    Check 'npm install: node runs cli.js directly' { $np.Code -eq 0 -and $np.Out -match 'ARGS=[^\r\n]*cli\.js \| -p' -and (Find-RunRecord 'npmjob').claude_pid -match '^\d+$' }
+
+    # A folder with an accent: git paths must survive PowerShell's decoding
+    $repoDir = "$tmp\d$([char]0xE9)p$([char]0xF4)t"
+    New-Item -ItemType Directory -Force $repoDir | Out-Null
+    & git -C $repoDir init -q 2>$null; [IO.File]::WriteAllText("$repoDir\a.txt", 'a'); & git -C $repoDir add a.txt 2>$null
+    & git -C $repoDir -c user.email=t@t -c user.name=t commit -qm init 2>$null
+    [IO.File]::WriteAllText("$repoDir\before.txt", 'b')
+    $null = Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x -Name gitjob -Cwd '$repoDir'"
+    [IO.File]::WriteAllText("$repoDir\after.txt", 'c')
+    $gr = (Invoke-Child "& '$bin\claude-worker.ps1' -Recover gitjob").Out
+    Check 'git works in a folder with accents'     { $gr.Contains('?? after.txt') -and [IO.File]::ReadAllText((Join-Path (Find-RunRecord 'gitjob').dir 'git-start.txt')).Contains('before.txt') }
+
+    Check 'a protected process is not our launcher' { -not (Test-RunProcess '4' (Get-Date).ToString('o')) }
+
+    # Classification: both platforms, same rules in the same order
+    $cases = @(
+        @('subtype=error_max_turns', 1, 'max_turns'), @('error=authentication_failed status= Invalid API key', 1, 'auth'),
+        @('api_error_status=401', 1, 'auth'), @('error=rate_limit status=429 slow down', 1, 'rate_limit'),
+        @('api_error_status=529', 1, 'overloaded'), @("error=server_error status= API Error: Can't reach the API server (ENOTFOUND)", 1, 'network'),
+        @('api_error_status=500', 1, 'server'), @('api_error_status=404', 1, 'request'),
+        @('error=billing_error status=400 Credit balance is too low', 1, 'credit'), @('Background tasks still running', 1, 'bg_timeout'),
+        @('', 143, 'killed'), @('', 1, 'unknown'))
+    $bad = @($cases | Where-Object { (Get-FailureReason $_[0] $_[1] $false) -ne $_[2] } | ForEach-Object { $_[2] })
+    Check 'failure reasons are classified'         { $bad.Count -eq 0 }
+    $psRules = @([regex]::Matches([IO.File]::ReadAllText("$bin\claude-worker-runs.ps1"), "(?m)^\s+'(\w+)'\s+= '") | ForEach-Object { $_.Groups[1].Value })
+    $shRules = @([regex]::Matches([IO.File]::ReadAllText("$bin\claude-worker-runs.sh"), '(?m)^(\w+)\|') | ForEach-Object { $_.Groups[1].Value })
+    Check 'Windows and bash rules match'           { $psRules.Count -ge 10 -and ($psRules -join ',') -eq ($shRules -join ',') }
 
     $ns = Invoke-Child "`$env:STUB_MODE = 'nosave'; & '$bin\claude-worker.ps1' -Prompt 'original brief' -Name job2"
     $job2 = Find-RunRecord 'job2'

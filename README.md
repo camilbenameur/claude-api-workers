@@ -101,8 +101,12 @@ On Windows: `-Runs`, `-Recover <name>`, `-ResumeRun <name>`.
   - stderr.
 
   The report is printed and saved as `report.md`. On macOS and Linux, the transcript part needs `python3`. Without it, the report keeps everything else.
-- **Resume.** `--resume-run` runs `claude -p --resume <session>` with the run's model, folder, options and output file. It tells the worker why it stopped, and asks it to check the files, finish only what is left, and resume an unfinished workflow if it can. Tested on real Opus workers killed mid-task and mid-workflow: they kept the files already written and finished the rest. Add `--prompt` to give other instructions. A run that crashed before saving any conversation is replayed from its brief under the same session id.
-- **Run files** live in `<worker home>/runs/<id>/`, next to the key store: `%LOCALAPPDATA%\claude-worker` on Windows, `~/.config/claude-worker` (mode 700) elsewhere. They hold `run.info`, the brief, stderr, the git state at start and the last report. They never contain the key. They are not cleaned up automatically, so delete old ones when you like.
+- **Resume.** `--resume-run` runs `claude -p --resume <session>` with the run's model, folder, options and output file. It tells the worker why it stopped, and asks it to check the files, finish only what is left, and resume an unfinished workflow if it can. Tested on real Opus workers killed mid-task and mid-workflow: they kept the files already written and finished the rest. A run that crashed before saving any conversation is replayed from its brief under the same session id.
+  - Add `--prompt` to give other instructions. Add claude options (`--max-turns 200`, ...) to change them: they are kept for later resumes too.
+  - The previous output file is copied to the run folder (`out-attempt-<n>`) before it is rewritten.
+  - Each attempt is judged only on what it adds to stderr and to the transcript, so an old error never decides the outcome of a later attempt.
+  - A lock stops two launchers from resuming the same run at once. A run that is still `running`, `orphaned` or already `succeeded` is refused unless you add `--force`.
+- **Run files** live in `<worker home>/runs/<id>/`, next to the key store: `%LOCALAPPDATA%\claude-worker` on Windows, `~/.config/claude-worker` (mode 700) elsewhere. They hold `run.info`, the brief, stderr (one section per attempt), the git state at start, earlier outputs, and the last report. They never contain the key. They are not cleaned up automatically, so delete old ones when you like.
 
 ## Safety model
 

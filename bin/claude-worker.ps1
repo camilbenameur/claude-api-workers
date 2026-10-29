@@ -32,6 +32,8 @@ $ProgressPreference = 'SilentlyContinue'
 function Fail([int]$Code, [string]$Message) { [Console]::Error.WriteLine("claude-worker: $Message"); exit $Code }
 
 $utf8 = New-Object Text.UTF8Encoding $false
+# Native programs (git, claude) write UTF-8: decode their output as such, not with the OEM code page
+try { [Console]::OutputEncoding = $utf8 } catch {}
 
 # Raw UTF-8 on stdout: Write-Output would go through the console code page
 function Write-Utf8Out([string]$Text) {
@@ -81,13 +83,22 @@ if ($Recover) {
 }
 
 $run = $null
+$runLock = $null
 $resumeTranscript = $false
 if ($ResumeRun) {
     $run = Find-RunRecord $ResumeRun
     if (-not $run) { Fail 2 "no run matches '$ResumeRun' (see -Runs)" }
+    # Held until this launcher exits: two resumes of one run must not drive the same session
+    $runLock = Lock-RunRecord $run
+    if (-not $runLock) { Fail 2 "run $($run.id) is being started or resumed by another launcher" }
     $state = Get-RunState $run
-    if ($state -eq 'running') { Fail 2 "run $($run.id) is still running (launcher PID $($run.launcher_pid))" }
-    if ($state -eq 'orphaned' -and -not $Force) { Fail 2 "claude is still running for run $($run.id) (PID $($run.claude_pid)): wait for it or stop it, or add -Force" }
+    if (($state -in @('running', 'orphaned', 'succeeded')) -and -not $Force) {
+        switch ($state) {
+            'running'   { Fail 2 "run $($run.id) is still running (launcher PID $($run.launcher_pid)). If you are sure it is not, add -Force" }
+            'orphaned'  { Fail 2 "claude is still running for run $($run.id) (PID $($run.claude_pid)): wait for it or stop it, or add -Force" }
+            'succeeded' { Fail 2 "run $($run.id) already succeeded. To continue it anyway, add -Force (and a -Prompt)" }
+        }
+    }
     if (-not $run.session_id) { Fail 2 "run $($run.id) has no session id: it cannot be resumed" }
     if ($Cwd -and $Cwd -ne $run.cwd) { Fail 2 "a resumed run keeps its folder ($($run.cwd)): drop -Cwd" }
     $Cwd = $run.cwd
@@ -159,15 +170,33 @@ function ConvertTo-NativeArgument([string]$Value) {
     return '"' + (($Value -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
 }
 
+# The program to start for claude, and the arguments that go before ours. An npm install puts
+# claude.cmd / claude.ps1 next to node_modules\@anthropic-ai\claude-code\cli.js: node is started
+# on cli.js directly, so that claude's real PID is recorded and its stderr captured.
+function Resolve-ClaudeProgram {
+    if ($claude.CommandType -eq 'Application' -and $claude.Source -match '\.exe$') { return @{ File = $claude.Source; Before = @() } }
+    $dir = Split-Path -Parent $claude.Source
+    $cli = Join-Path $dir 'node_modules\@anthropic-ai\claude-code\cli.js'
+    if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { return $null }
+    $node = Join-Path $dir 'node.exe'
+    if (-not (Test-Path -LiteralPath $node -PathType Leaf)) {
+        $n = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $n) { return $null }
+        $node = $n.Source
+    }
+    return @{ File = $node; Before = @($cli) }
+}
+
 # Runs claude with the prompt on stdin. Output goes straight to our stdout, or byte for byte
-# into $OutPath; stderr goes to $ErrPath when given. A real .exe is started directly, so Windows
-# PowerShell 5.1 cannot mangle the arguments (inline JSON) or the encoding (non-ASCII prompts);
-# npm .cmd/.ps1 shims go through PowerShell with UTF-8 forced (their stderr is not captured).
+# into $OutPath; stderr goes to $ErrPath when given. The program is started directly, so Windows
+# PowerShell 5.1 cannot mangle the arguments (inline JSON) or the encoding (non-ASCII prompts).
+# Any other shim goes through PowerShell with UTF-8 forced (no PID, stderr not captured).
 function Invoke-Claude([string[]]$ArgList, [string]$OutPath, [string]$ErrPath, $Record) {
-    if ($claude.CommandType -eq 'Application' -and $claude.Source -match '\.exe$') {
+    $program = Resolve-ClaudeProgram
+    if ($program) {
         $psi = New-Object Diagnostics.ProcessStartInfo
-        $psi.FileName = $claude.Source
-        $psi.Arguments = (@($ArgList) | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
+        $psi.FileName = $program.File
+        $psi.Arguments = (@($program.Before) + @($ArgList) | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
         $psi.WorkingDirectory = $workDir
         $psi.UseShellExecute = $false
         $psi.RedirectStandardInput = $true
@@ -224,6 +253,21 @@ function Find-Option([string[]]$List, [string[]]$Names) {
     return -1
 }
 
+# claude options without the ones that pick a session: a resume chooses its own
+function Remove-SessionFlags([string[]]$List) {
+    $kept = New-Object Collections.Generic.List[string]
+    for ($k = 0; $k -lt $List.Count; $k++) {
+        if ($List[$k] -in '--session-id', '--resume', '-r') {
+            # --resume may come without a value (picker)
+            if ($k + 1 -lt $List.Count -and -not $List[$k + 1].StartsWith('-')) { $k++ }
+            continue
+        }
+        if ($List[$k] -in '--continue', '-c', '--fork-session') { continue }
+        $kept.Add($List[$k])
+    }
+    return $kept.ToArray()
+}
+
 $code = 1
 try {
     if ($SelfTest) {
@@ -245,15 +289,16 @@ try {
     }
     else {
         if ($run) {
-            # Resume: same session, the options of the first launch (minus its session flag), then ours
-            $stored = New-Object Collections.Generic.List[string]
-            $sa = @($run.args)
-            for ($k = 0; $k -lt $sa.Count; $k++) {
-                if ($sa[$k] -eq '--session-id') { $k++; continue }
-                $stored.Add($sa[$k])
-            }
+            # Resume: same session, the options of the earlier attempts, then the new ones (claude
+            # keeps the last value of an option). They are saved for the next resume.
+            $options = @(Remove-SessionFlags @($run.args)) + @(Remove-SessionFlags @($ClaudeArgs))
             $sessionArgs = if ($resumeTranscript) { @('--resume', $run.session_id) } else { @('--session-id', $run.session_id) }
-            $claudeLine = @($stored.ToArray()) + @($ClaudeArgs) + $sessionArgs
+            $claudeLine = $options + $sessionArgs
+            $run.args = $options
+            # The output file is rewritten: keep the previous attempt's result next to the run
+            if ($OutFile -and (Get-FileLength $OutFile) -gt 0) {
+                Copy-Item -LiteralPath $OutFile -Destination (Join-Path $run.dir "out-attempt-$($run.attempts)$([IO.Path]::GetExtension($OutFile))") -Force
+            }
             $run.attempts = "$([int]$run.attempts + 1)"
             [IO.File]::WriteAllText((Join-Path $run.dir "resume-$($run.attempts).md"), $Prompt, $utf8)
             $run.model = $Model; $run.fast = $(if ($Fast) { '1' } else { '0' }); $run.out_file = $OutFile
@@ -270,24 +315,30 @@ try {
                 $sessionArgs = @('--session-id', $sessionId)
             }
             $run = New-RunRecord $Name $sessionId
+            $runLock = Lock-RunRecord $run
             $run.cwd = $workDir; $run.model = $Model; $run.fast = $(if ($Fast) { '1' } else { '0' }); $run.out_file = $OutFile
             $run.args = $ClaudeArgs
             $git = Get-GitInfo $workDir
             $run.git_root = $git.root; $run.git_head = $git.head
-            if ($git.root) { [IO.File]::WriteAllText((Join-Path $run.dir 'git-start.txt'), ((& git -C $git.root status --porcelain 2>$null) -join "`n"), $utf8) }
+            if ($git.root) { [IO.File]::WriteAllText((Join-Path $run.dir 'git-start.txt'), ((& git -C $workDir status --porcelain 2>$null) -join "`n"), $utf8) }
             [IO.File]::WriteAllText((Join-Path $run.dir 'prompt.md'), $Prompt, $utf8)
             $claudeLine = @($ClaudeArgs) + $sessionArgs
         }
         $run.launcher_pid = "$PID"; $run.claude_pid = ''
         $run.last_start = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK')
+        # Each attempt is judged on what it adds to stderr.log and to the transcript
+        $errLog = Join-Path $run.dir 'stderr.log'
+        [IO.File]::AppendAllText($errLog, "--- attempt $($run.attempts), $($run.last_start) ---`n", $utf8)
+        $run.stderr_offset = "$(Get-FileLength $errLog)"
+        $run.transcript_offset = "$(Get-FileLength (Find-RunTranscript $run))"
         Save-RunRecord $run
         [Console]::Error.WriteLine("claude-worker: run $($run.id) (session $($run.session_id), attempt $($run.attempts))")
 
-        $errLog = Join-Path $run.dir 'stderr.log'
         $code = Invoke-Claude ($base + $claudeLine) $OutFile $errLog $run
-        if (Test-Path -LiteralPath $errLog) {
-            $bytes = [IO.File]::ReadAllBytes($errLog)
-            $errOut = [Console]::OpenStandardError(); $errOut.Write($bytes, 0, $bytes.Length); $errOut.Flush()
+        $errBytes = [IO.File]::ReadAllBytes($errLog)
+        $from = [int]$run.stderr_offset
+        if ($errBytes.Length -gt $from) {
+            $errOut = [Console]::OpenStandardError(); $errOut.Write($errBytes, $from, $errBytes.Length - $from); $errOut.Flush()
         }
         $outcome = Complete-RunRecord $run $code $false
         if ($outcome.failed) {
@@ -306,5 +357,6 @@ finally {
         $run.ended = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK')
         try { Save-RunRecord $run } catch {}
     }
+    if ($runLock) { $runLock.Close() }
 }
 exit $code

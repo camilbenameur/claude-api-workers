@@ -94,6 +94,7 @@ $values = [ordered]@{
     '{{RECOVER_CMD}}'    = "$worker -Recover"
     '{{RESUME_CMD}}'     = "$worker -ResumeRun"
     '{{PROMPT_OPT}}'     = '`-Prompt "..."` or `-PromptFile <file>`'
+    '{{FORCE_OPT}}'      = '-Force'
 }
 foreach ($k in $values.Keys) { $rule = $rule.Replace($k, $values[$k]) }
 $block = "$begin`n$($rule.Trim())`n$end"

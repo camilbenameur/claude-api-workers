@@ -26,8 +26,8 @@ If you are yourself a worker or one of its agents (your system prompt says so, o
    - `rate_limit`, `overloaded`, `server`, `network`, `interrupted`, `killed`, `bg_timeout`: continue right away. If the same error comes back, wait a few minutes.
    - `max_turns` or `budget`: continue with a higher limit if the user agrees.
    - `request` or `unknown`: read the detail and stderr in the report before deciding.
-   - State `running`: it is still working, wait. State `orphaned`: claude still runs without its launcher and may still edit files, so wait for it to stop.
-3. Continue the same worker, in the background like the first launch: `{{RESUME_CMD}} <name>`. It resumes the worker's own conversation (`claude --resume`) with its whole context, the same model, folder, options and output file, and tells it what happened so it checks the files and finishes only what is left. Add {{PROMPT_OPT}} to give it other instructions. Then check its work as in step 3 above.
+   - State `running`: it is still working, wait. State `orphaned`: claude still runs without its launcher and may still edit files, so wait for it to stop. State `succeeded`: nothing to recover, its result is in the output file.
+3. Continue the same worker, in the background like the first launch: `{{RESUME_CMD}} <name>`. It resumes the worker's own conversation (`claude --resume`) with its whole context, the same model, folder, options and output file, and tells it what happened so it checks the files and finishes only what is left. Add {{PROMPT_OPT}} to give it other instructions, and claude options (such as a higher `--max-turns`) to change them for this attempt and the next ones. The previous output file is kept in the run folder. The launcher refuses a run that is running, orphaned or already succeeded unless you add `{{FORCE_OPT}}`. Then check its work as in step 3 above.
 
 Do not fall back to your own sub-agents without the user's OK.
 

@@ -23,24 +23,37 @@ function Get-ClaudeConfigDir {
 function ConvertTo-InfoValue([string]$Value) { $Value.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
 function ConvertFrom-InfoValue([string]$Value) { $Value.Replace('%0A', "`n").Replace('%0D', "`r").Replace('%25', '%') }
 
+# stderr_offset / transcript_offset: where the current attempt starts in stderr.log and in the
+# transcript, so that a resumed attempt is judged on its own output only
 $script:RunFields = 'id', 'name', 'session_id', 'cwd', 'model', 'fast', 'out_file', 'status', 'reason', 'detail',
-    'exit_code', 'attempts', 'started', 'last_start', 'ended', 'launcher_pid', 'claude_pid', 'git_root', 'git_head'
+    'exit_code', 'attempts', 'started', 'last_start', 'ended', 'launcher_pid', 'claude_pid', 'git_root', 'git_head',
+    'stderr_offset', 'transcript_offset'
 
 function New-RunRecord([string]$Name, [string]$SessionId) {
     $root = Get-RunsRoot
     New-Item -ItemType Directory -Force $root | Out-Null
-    $label = if ($Name) { ($Name -replace '[^A-Za-z0-9._-]', '-') } elseif ($SessionId) { $SessionId.Substring(0, 8) } else { 'run' }
+    $label = if ($Name) { ($Name -replace '[^A-Za-z0-9._-]', '-') } elseif ($SessionId) { $SessionId.Substring(0, 8) } else { [guid]::NewGuid().ToString().Substring(0, 8) }
     if ($label.Length -gt 40) { $label = $label.Substring(0, 40) }
     $id = (Get-Date).ToString('yyyyMMdd-HHmmss') + '-' + $label
-    while (Test-Path -LiteralPath (Join-Path $root $id)) { $id += '-' + [guid]::NewGuid().ToString().Substring(0, 4) }
+    # CreateDirectory would accept an existing folder: two launches in the same second must not share one
+    while ($true) {
+        try { New-Item -ItemType Directory -Path (Join-Path $root $id) -ErrorAction Stop | Out-Null; break }
+        catch { if (-not (Test-Path -LiteralPath (Join-Path $root $id))) { throw }; $id += '-' + [guid]::NewGuid().ToString().Substring(0, 4) }
+    }
     $run = [ordered]@{}
     foreach ($f in $script:RunFields) { $run[$f] = '' }
     $run.id = $id; $run.name = $Name; $run.session_id = $SessionId; $run.attempts = '1'; $run.status = 'running'
     $run.started = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK'); $run.last_start = $run.started
     $run.args = @()
     $run.dir = Join-Path $root $id
-    New-Item -ItemType Directory -Force $run.dir | Out-Null
     return $run
+}
+
+# Holds <run>\lock open with no sharing while this launcher works on the run. Windows releases
+# it when the process dies, so a crash never leaves a stale lock. $null when another launcher has it.
+function Lock-RunRecord($Run) {
+    try { return [IO.File]::Open((Join-Path $Run.dir 'lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
+    catch [IO.IOException] { return $null }
 }
 
 function Save-RunRecord($Run) {
@@ -96,9 +109,24 @@ function Test-RunProcess([string]$ProcessId, [string]$Since) {
     if ($ProcessId -notmatch '^\d+$') { return $false }
     $p = Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue
     if (-not $p) { return $false }
-    # A recycled PID belongs to a process started after the run
-    try { if ($Since -and $p.StartTime -gt ([datetime]$Since).AddSeconds(5)) { return $false } } catch {}
+    # A recycled PID belongs to a process started after the run. Our launcher and claude run as
+    # this user, so their start time is readable: an unreadable one (system or elevated process)
+    # is someone else's.
+    $start = $null
+    try { $start = $p.StartTime } catch {}
+    if (-not $start) { return $false }
+    try { if ($Since -and $start -gt ([datetime]$Since).AddSeconds(5)) { return $false } } catch {}
     return $true
+}
+
+# The JSON result line of an output file, or $null
+function Get-ResultLine([string]$Path) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $resultLine = $null
+    foreach ($l in [IO.File]::ReadLines($Path, $script:RunsUtf8)) {
+        if ($l.TrimStart().StartsWith('{') -and $l.Contains('"type":"result"')) { $resultLine = $l }
+    }
+    return $resultLine
 }
 
 # running | orphaned (launcher gone, claude still running) | interrupted | succeeded | failed
@@ -106,6 +134,19 @@ function Get-RunState($Run) {
     if ($Run.status -ne 'running') { return $Run.status }
     if (Test-RunProcess $Run.launcher_pid $Run.last_start) { return 'running' }
     if (Test-RunProcess $Run.claude_pid $Run.last_start) { return 'orphaned' }
+    if (-not $Run.claude_pid) {
+        # claude's PID was never recorded: a transcript still growing means it is alive
+        $t = Find-RunTranscript $Run
+        if ($t -and ((Get-Date) - (Get-Item -LiteralPath $t).LastWriteTime).TotalMinutes -lt 2) { return 'orphaned' }
+    }
+    # Launcher and claude are gone. If claude still finished cleanly, its result is in the output file.
+    $line = Get-ResultLine $Run.out_file
+    if ($line -and $line.Contains('"is_error":false') -and (Get-Item -LiteralPath $Run.out_file).LastWriteTime -ge ([datetime]$Run.last_start)) {
+        $Run.status = 'succeeded'; $Run.detail = 'the launcher was lost; the result was read from the output file'
+        $Run.ended = (Get-Item -LiteralPath $Run.out_file).LastWriteTime.ToString('yyyy-MM-ddTHH:mm:ssK')
+        try { Save-RunRecord $Run } catch {}
+        return 'succeeded'
+    }
     return 'interrupted'
 }
 
@@ -120,6 +161,8 @@ function Find-RunTranscript($Run) {
     return $hit
 }
 
+# Git paths are read as UTF-8 (claude-worker.ps1 sets the console encoding): with the OEM code
+# page, a folder named with accents would come back garbled and every later git call would fail.
 function Get-GitInfo([string]$Dir) {
     $info = @{ root = ''; head = '' }
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $info }
@@ -131,33 +174,46 @@ function Get-GitInfo([string]$Dir) {
     return $info
 }
 
-# Why a run failed, from what claude left behind: the -OutFile JSON (is_error, terminal_reason,
-# api_error_status, subtype), the transcript's last assistant message (isApiErrorMessage), stderr.
+function Get-FileLength([string]$Path) {
+    if ($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) { return (Get-Item -LiteralPath $Path).Length }
+    return 0
+}
+
+# The text of a file from a byte offset on (the current attempt's part)
+function Read-FileFrom([string]$Path, [long]$Offset) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $fs = [IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+    try {
+        if ($Offset -gt 0 -and $Offset -le $fs.Length) { [void]$fs.Seek($Offset, 'Begin') }
+        return (New-Object IO.StreamReader($fs, $script:RunsUtf8)).ReadToEnd()
+    }
+    finally { $fs.Close() }
+}
+
+# Why a run failed, from what the current attempt left behind: the -OutFile JSON (is_error,
+# terminal_reason, api_error_status, subtype, result), the transcript's last assistant message
+# (isApiErrorMessage) written after transcript_offset, and stderr after stderr_offset.
 # Returns @{ failed; reason; detail }.
 function Get-RunOutcome($Run, [int]$ExitCode, [bool]$Killed) {
     $facts = New-Object Collections.Generic.List[string]
     $detail = ''
     $isError = $false
-    if ($Run.out_file -and (Test-Path -LiteralPath $Run.out_file -PathType Leaf)) {
-        $resultLine = $null
-        foreach ($l in [IO.File]::ReadLines($Run.out_file, $script:RunsUtf8)) {
-            if ($l.TrimStart().StartsWith('{') -and $l.Contains('"type":"result"')) { $resultLine = $l }
+    $resultLine = Get-ResultLine $Run.out_file
+    if ($resultLine) {
+        try {
+            $j = $resultLine | ConvertFrom-Json
+            if ($j.is_error) { $isError = $true }
+            $facts.Add("subtype=$($j.subtype) terminal_reason=$($j.terminal_reason) api_error_status=$($j.api_error_status)")
+            if ($j.is_error -and $j.result) { $detail = [string]$j.result; $facts.Add((Get-OneLine $detail 400)) }
+            # claude reports the session it really used (a resume or fork may change it)
+            if ($j.session_id) { $Run.session_id = [string]$j.session_id }
         }
-        if ($resultLine) {
-            try {
-                $j = $resultLine | ConvertFrom-Json
-                if ($j.is_error) { $isError = $true }
-                $facts.Add("subtype=$($j.subtype) terminal_reason=$($j.terminal_reason) api_error_status=$($j.api_error_status)")
-                if ($j.is_error -and $j.result) { $detail = [string]$j.result }
-                if (-not $Run.session_id -and $j.session_id) { $Run.session_id = [string]$j.session_id }
-            }
-            catch {}
-        }
+        catch {}
     }
     $transcript = Find-RunTranscript $Run
     if ($transcript) {
         $last = $null
-        foreach ($l in [IO.File]::ReadLines($transcript, $script:RunsUtf8)) { if ($l.Contains('"type":"assistant"')) { $last = $l } }
+        foreach ($l in ((Read-FileFrom $transcript ([long]("0$($Run.transcript_offset)"))) -split "`n")) { if ($l.Contains('"type":"assistant"')) { $last = $l } }
         if ($last -and $last.Contains('"isApiErrorMessage":true')) {
             $isError = $true
             try {
@@ -169,11 +225,9 @@ function Get-RunOutcome($Run, [int]$ExitCode, [bool]$Killed) {
             catch {}
         }
     }
-    $errLog = Join-Path $Run.dir 'stderr.log'
-    if (Test-Path -LiteralPath $errLog -PathType Leaf) {
-        $tail = @([IO.File]::ReadAllLines($errLog, $script:RunsUtf8) | Where-Object { $_.Trim() -and $_ -notmatch 'connectors are disabled' } | Select-Object -Last 20)
-        if ($tail.Count) { $facts.Add(($tail -join ' ')); if (-not $detail) { $detail = $tail[-1] } }
-    }
+    $errText = Read-FileFrom (Join-Path $Run.dir 'stderr.log') ([long]("0$($Run.stderr_offset)"))
+    $tail = @($errText -split "`r?`n" | Where-Object { $_.Trim() -and $_ -notmatch 'connectors are disabled' } | Select-Object -Last 20)
+    if ($tail.Count) { $facts.Add(($tail -join ' ')); if (-not $detail) { $detail = $tail[-1] } }
     $all = ($facts -join ' ')
     $bgStopped = $all -match 'Background tasks still running'
     if ($ExitCode -eq 0 -and -not $isError -and -not $bgStopped -and -not $Killed) {
@@ -481,16 +535,16 @@ function Get-RunReport($Run) {
         if ($start) {
             [void]$sb.AppendLine("Commits since the run started ($($start.Substring(0, [Math]::Min(12, $start.Length)))):")
             [void]$sb.AppendLine('```')
-            [void]$sb.AppendLine(((& git -C $git.root log --oneline "$start..HEAD" 2>$null | Select-Object -First 50) -join "`n"))
+            [void]$sb.AppendLine(((& git -C $Run.cwd log --oneline "$start..HEAD" 2>$null | Select-Object -First 50) -join "`n"))
             [void]$sb.AppendLine('```')
             [void]$sb.AppendLine("Changes since then (committed or not, ``git diff --stat $($start.Substring(0, [Math]::Min(12, $start.Length)))``):")
             [void]$sb.AppendLine('```')
-            [void]$sb.AppendLine(((& git -C $git.root diff --stat $start 2>$null | Select-Object -Last 80) -join "`n"))
+            [void]$sb.AppendLine(((& git -C $Run.cwd diff --stat $start 2>$null | Select-Object -Last 80) -join "`n"))
             [void]$sb.AppendLine('```')
         }
         [void]$sb.AppendLine('`git status --porcelain` now:')
         [void]$sb.AppendLine('```')
-        [void]$sb.AppendLine(((& git -C $git.root status --porcelain 2>$null | Select-Object -First 80) -join "`n"))
+        [void]$sb.AppendLine(((& git -C $Run.cwd status --porcelain 2>$null | Select-Object -First 80) -join "`n"))
         [void]$sb.AppendLine('```')
         $before = Join-Path $Run.dir 'git-start.txt'
         if ((Test-Path -LiteralPath $before) -and (Get-Item -LiteralPath $before).Length) { [void]$sb.AppendLine("Files already modified before the run started: $before") }

@@ -97,6 +97,7 @@ rule=${rule//'{{RECOVER_CMD}}'/\"$bin/claude-worker\" --recover}
 rule=${rule//'{{RESUME_CMD}}'/\"$bin/claude-worker\" --resume-run}
 prompt_opt='`--prompt "..."` or `--prompt-file <file>`'
 rule=${rule//'{{PROMPT_OPT}}'/$prompt_opt}
+rule=${rule//'{{FORCE_OPT}}'/--force}
 block="$begin"$'\n'"$rule"$'\n'"$end"
 
 rest=$(other_content)

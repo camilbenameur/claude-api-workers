@@ -58,8 +58,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Run records hold the brief and the output: private to this user, like the key
+# Run records hold the brief and the output: private to this user, like the key. claude itself
+# gets the caller's umask back, so the files it writes in the project keep their usual modes.
+caller_umask=$(umask)
 umask 077
+
+fast_file=''
+cleanup() { [ -n "$fast_file" ] && rm -f "$fast_file"; cw_run_unlock; }
+trap cleanup EXIT
 
 if [ "$list_runs" = 1 ]; then
     root=$(cw_runs_root); dirs=()
@@ -87,9 +93,16 @@ fi
 resuming=0 resume_transcript=0
 if [ -n "$resume_run" ]; then
     cw_run_find "$resume_run" || fail 2 "no run matches '$resume_run' (see --runs)"
+    # Held until this launcher exits: two resumes of one run must not drive the same session
+    cw_run_lock || fail 2 "run $R_id is being started or resumed by another launcher"
     state=$(cw_run_state)
-    [ "$state" = running ] && fail 2 "run $R_id is still running (launcher PID $R_launcher_pid)"
-    [ "$state" = orphaned ] && [ "$force" = 0 ] && fail 2 "claude is still running for run $R_id (PID $R_claude_pid): wait for it or stop it, or add --force"
+    if [ "$force" = 0 ]; then
+        case $state in
+            running) fail 2 "run $R_id is still running (launcher PID $R_launcher_pid). If you are sure it is not, add --force" ;;
+            orphaned) fail 2 "claude is still running for run $R_id (PID $R_claude_pid): wait for it or stop it, or add --force" ;;
+            succeeded) fail 2 "run $R_id already succeeded. To continue it anyway, add --force (and a --prompt)" ;;
+        esac
+    fi
     [ -n "$R_session_id" ] || fail 2 "run $R_id has no session id: it cannot be resumed"
     [ -z "$cwd" ] || [ "$cwd" = "$R_cwd" ] || fail 2 "a resumed run keeps its folder ($R_cwd): drop --cwd"
     resuming=1 cwd=$R_cwd
@@ -140,8 +153,6 @@ base=(-p --model "$model" --append-system-prompt "$guard")
 
 # claude -p only uses fast mode when the --settings file opts in. The Anthropic API still
 # decides per organization: without access, the worker simply runs at standard speed.
-fast_file=''
-trap '[ -n "$fast_file" ] && rm -f "$fast_file"' EXIT
 if [ "$fast" = 1 ]; then
     fast_file=$(mktemp) || fail 2 "cannot create a temporary file"
     printf '{"fastMode": true}' > "$fast_file"
@@ -163,16 +174,32 @@ if [ "$self_test" = 1 ]; then
     exit 1
 fi
 
-if [ "$resuming" = 1 ]; then
-    # Resume: same session, the options of the first launch (minus its session flag), then ours
-    stored=() skip=0
-    for a in ${R_args[@]+"${R_args[@]}"}; do
-        [ "$skip" = 1 ] && { skip=0; continue; }
-        [ "$a" = --session-id ] && { skip=1; continue; }
-        stored+=("$a")
+# claude options without the ones that pick a session (a resume chooses its own), in $options
+drop_session_flags() {
+    options=() skip=0
+    for a in "$@"; do
+        if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) continue ;; esac; fi
+        case $a in
+            --session-id | --resume | -r) skip=1; continue ;;   # --resume may come without a value
+            --continue | -c | --fork-session) continue ;;
+        esac
+        options+=("$a")
     done
+}
+
+if [ "$resuming" = 1 ]; then
+    # Resume: same session, the options of the earlier attempts, then the new ones (claude keeps
+    # the last value of an option). They are saved for the next resume.
+    drop_session_flags ${R_args[@]+"${R_args[@]}"}; earlier=(${options[@]+"${options[@]}"})
+    drop_session_flags ${extra[@]+"${extra[@]}"}
+    R_args=(${earlier[@]+"${earlier[@]}"} ${options[@]+"${options[@]}"})
     if [ "$resume_transcript" = 1 ]; then session_args=(--resume "$R_session_id"); else session_args=(--session-id "$R_session_id"); fi
-    line=(${stored[@]+"${stored[@]}"} ${extra[@]+"${extra[@]}"} "${session_args[@]}")
+    line=(${R_args[@]+"${R_args[@]}"} "${session_args[@]}")
+    # The output file is rewritten: keep the previous attempt's result next to the run
+    if [ -n "$out_file" ] && [ -s "$out_file" ]; then
+        ext=''; case ${out_file##*/} in *.*) ext=".${out_file##*.}" ;; esac
+        cp -f "$out_file" "$R_dir/out-attempt-$R_attempts$ext"
+    fi
     R_attempts=$((R_attempts + 1))
     printf '%s' "$prompt" > "$R_dir/resume-$R_attempts.md"
     R_model=$model R_fast=$fast R_out_file=$out_file
@@ -187,6 +214,7 @@ else
         [ "$own" = 1 ] && { sid=$(cw_uuid); session_args=(--session-id "$sid"); }
     fi
     cw_run_new "$name" "$sid" || fail 2 "cannot create the run folder in $(cw_runs_root)"
+    cw_run_lock
     R_cwd=$PWD R_model=$model R_fast=$fast R_out_file=$out_file
     R_args=(${extra[@]+"${extra[@]}"})
     if command -v git >/dev/null 2>&1 && R_git_root=$(git rev-parse --show-toplevel 2>/dev/null); then
@@ -198,17 +226,24 @@ else
     printf '%s' "$prompt" > "$R_dir/prompt.md"
     line=(${extra[@]+"${extra[@]}"} ${session_args[@]+"${session_args[@]}"})
 fi
-R_launcher_pid=$$ R_claude_pid='' R_last_start=$(cw_now)
+R_launcher_pid=$$ R_claude_pid='' R_last_start=$(cw_now) R_last_start_epoch=$(date +%s)
+# Each attempt is judged on what it adds to stderr.log and to the transcript
+errlog="$R_dir/stderr.log"
+printf -- '--- attempt %s, %s ---\n' "$R_attempts" "$R_last_start" >> "$errlog"
+R_stderr_offset=$(wc -c < "$errlog" | tr -d ' ')
+R_transcript_offset=0
+t=$(cw_transcript) && R_transcript_offset=$(wc -c < "$t" | tr -d ' ')
 cw_run_save
 echo "claude-worker: run $R_id (session $R_session_id, attempt $R_attempts)" >&2
 
 # claude runs in the background so that its PID is recorded and a TERM/INT/HUP sent to the
-# launcher reaches it; stderr is kept in the run folder, then copied to ours.
-errlog="$R_dir/stderr.log"
+# launcher reaches it; stderr is kept in the run folder, then copied to ours. The output file
+# is created here, private; claude gets the caller's umask (exec keeps the subshell's PID).
 if [ -n "$out_file" ]; then
-    printf '%s' "$prompt" | "$claude_bin" "${base[@]}" ${line[@]+"${line[@]}"} > "$out_file" 2>> "$errlog" &
+    : > "$out_file"
+    printf '%s' "$prompt" | (umask "$caller_umask"; exec "$claude_bin" "${base[@]}" ${line[@]+"${line[@]}"}) > "$out_file" 2>> "$errlog" &
 else
-    printf '%s' "$prompt" | "$claude_bin" "${base[@]}" ${line[@]+"${line[@]}"} 2>> "$errlog" &
+    printf '%s' "$prompt" | (umask "$caller_umask"; exec "$claude_bin" "${base[@]}" ${line[@]+"${line[@]}"}) 2>> "$errlog" &
 fi
 cpid=$!
 R_claude_pid=$cpid; cw_run_save
@@ -217,7 +252,7 @@ trap 'killed=1; kill -TERM "$cpid" 2>/dev/null' TERM INT HUP
 wait "$cpid"; code=$?
 while cw_pid_alive "$cpid"; do wait "$cpid"; code=$?; done
 trap - TERM INT HUP
-cat "$errlog" >&2 2>/dev/null
+tail -c +$((R_stderr_offset + 1)) "$errlog" >&2 2>/dev/null
 cw_run_complete "$code" "$killed"
 if [ "$O_failed" = 1 ]; then
     echo "claude-worker: run $R_id failed ($O_reason): $O_detail" >&2
