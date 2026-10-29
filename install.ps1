@@ -86,10 +86,14 @@ $values = [ordered]@{
     '{{DATE}}'           = (Get-Date -Format 'yyyy-MM-dd')
     '{{REPO_URL}}'       = $repoUrl
     '{{SHELL_TOOL}}'     = 'PowerShell (or Bash)'
-    '{{RUN_EXAMPLE}}'    = "$worker -PromptFile `"<brief.md>`" -Model sonnet -Cwd `"<project dir>`" -OutFile `"<scratchpad>\out-<name>.json`" --permission-mode acceptEdits --output-format json"
+    '{{RUN_EXAMPLE}}'    = "$worker -PromptFile `"<brief.md>`" -Name <name> -Model sonnet -Cwd `"<project dir>`" -OutFile `"<scratchpad>\out-<name>.json`" --permission-mode acceptEdits --output-format json"
     '{{PLATFORM_NOTES}}' = $notes
     '{{SETKEY_CMD}}'     = $setKey
     '{{STATUS_CMD}}'     = "$setKey -Status"
+    '{{RUNS_CMD}}'       = "$worker -Runs"
+    '{{RECOVER_CMD}}'    = "$worker -Recover"
+    '{{RESUME_CMD}}'     = "$worker -ResumeRun"
+    '{{PROMPT_OPT}}'     = '`-Prompt "..."` or `-PromptFile <file>`'
 }
 foreach ($k in $values.Keys) { $rule = $rule.Replace($k, $values[$k]) }
 $block = "$begin`n$($rule.Trim())`n$end"

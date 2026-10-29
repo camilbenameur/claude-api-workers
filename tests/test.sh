@@ -76,6 +76,7 @@ if [ -n "$sid" ] && [ "$mode" != nosave ]; then
         asst '{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"step one","status":"completed"},{"content":"step two","status":"in_progress"}]}}' >> "$t"
         asst '{"type":"tool_use","name":"Edit","input":{"file_path":"/proj/main-é.txt","old_string":"a","new_string":"b"}}' >> "$t"
         asst '{"type":"tool_use","name":"Bash","input":{"command":"npm test"}}' >> "$t"
+        echo '{"type":"user","toolUseResult":{"runId":"wf_stub-2","workflowName":"launched-only","scriptPath":"/s/wf2.js"},"message":{"content":[]}}' >> "$t"
         asst '{"type":"text","text":"Step one done, starting step two."}' >> "$t"
         echo '{"type":"assistant","isApiErrorMessage":true,"error":"billing_error","apiErrorStatus":400,"message":{"content":[{"type":"text","text":"Credit balance is too low"}]}}' >> "$t"
         wd="$proj/$sid/subagents/workflows/wf_stub-1"; mkdir -p "$wd" "$proj/$sid/workflows"
@@ -138,6 +139,7 @@ if command -v python3 >/dev/null 2>&1; then
     check "--recover shows the task list"      '[[ $rep == *"- [x] step one"* && $rep == *"- [~] step two"* ]]'
     check "--recover lists files, sub-agents too" '[[ $rep == *"main-é.txt - Edit x1"* && $rep == *"from-agent.txt - Write (sub-agent) x1"* ]]'
     check "--recover shows unfinished workflows" '[[ $rep == *"wf_stub-1"* && $rep == *"stub-fixes"* && $rep == *"1/2 agents finished; unfinished: fix:2"* ]]'
+    check "--recover knows workflows from launch" '[[ $rep == *"launched-only - status no end record"* && $rep == *"wf2.js"* ]]'
     check "--recover shows messages and calls" '[[ $rep == *"Step one done, starting step two."* && $rep == *"Bash: npm test"* ]]'
 else
     echo "skip - transcript digest (no python3)"
@@ -220,6 +222,7 @@ case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) echo "skip - install.sh tests (W
     check "reinstall leaves a single block"    '[ "$(grep -c "claude-api-workers:begin" "$HOME/.claude/CLAUDE.md")" = 1 ]'
     check "mode on-request was applied"        '[[ $md == *"asks for \"API workers\""* ]]'
     check "no placeholder left"                '[[ $md != *"{{"* ]]'
+    check "rule explains the recovery commands" '[[ $md == *"claude-worker\" --recover <name>"* && $md == *"claude-worker\" --resume-run <name>"* && $md == *"--prompt \"...\"\` or"* ]]'
     check "scripts are executable"             '[ -x "$HOME/.claude/claude-worker/bin/claude-worker" ]'
     check "recovery scripts are installed"     '[ -f "$HOME/.claude/claude-worker/bin/claude-worker-runs.sh" ] && [ -x "$HOME/.claude/claude-worker/bin/claude-worker-digest.py" ]'
     check "backup holds the original file"     'cmp -s "$HOME/.claude.md.seed" "$HOME/.claude/CLAUDE.md.bak-claude-api-workers"'

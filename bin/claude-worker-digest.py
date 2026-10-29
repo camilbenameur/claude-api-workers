@@ -89,7 +89,13 @@ def digest(transcript):
         key = '%s (%s)' % (tool, who) if who else tool
         ops[key] = ops.get(key, 0) + 1
 
+    launched = {}  # runId -> the Workflow tool's own result (name, script), known from the launch
     for line in lines_of(transcript):
+        if '"toolUseResult"' in line and '"runId":"wf_' in line:
+            r = (parse(line) or {}).get('toolUseResult')
+            if isinstance(r, dict) and r.get('runId'):
+                launched[r['runId']] = r
+            continue
         if '"type":"assistant"' not in line:
             continue
         j = parse(line)
@@ -135,16 +141,23 @@ def digest(transcript):
     for d in sorted(glob.glob(os.path.join(wf_agents_dir, 'wf_*'))):
         if os.path.isdir(d):
             ids[os.path.basename(d)] = 1
+    for run_id in launched:
+        ids[run_id] = 1
     wf_lines = []
     for run_id in ids:
-        name, status, script, err = '', 'unknown', '', ''
+        # <runId>.json is only written when the workflow ends
+        name, status, script, err = '', 'no end record (still running when the worker stopped)', '', ''
+        if run_id in launched:
+            name = launched[run_id].get('workflowName') or ''
+            script = launched[run_id].get('scriptPath') or ''
         meta = os.path.join(wf_json_dir, run_id + '.json')
         if os.path.isfile(meta):
             try:
                 with open(meta, encoding='utf-8', errors='replace') as f:
                     w = json.load(f)
-                name, status = w.get('workflowName') or '', w.get('status') or 'unknown'
-                script = w.get('scriptPath') or ''
+                name = w.get('workflowName') or name
+                status = w.get('status') or 'unknown'
+                script = w.get('scriptPath') or script
                 err = one_line(w['error'], 200) if w.get('error') else ''
             except (ValueError, OSError):
                 pass

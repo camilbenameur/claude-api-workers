@@ -97,6 +97,7 @@ public static class Stub {
                 t.Append(Asst("{\"type\":\"tool_use\",\"name\":\"TodoWrite\",\"input\":{\"todos\":[{\"content\":\"step one\",\"status\":\"completed\"},{\"content\":\"step two\",\"status\":\"in_progress\"}]}}"));
                 t.Append(Asst("{\"type\":\"tool_use\",\"name\":\"Edit\",\"input\":{\"file_path\":\"C:\\\\proj\\\\main-\u00e9.txt\",\"old_string\":\"a\",\"new_string\":\"b\"}}"));
                 t.Append(Asst("{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"npm test\"}}"));
+                t.Append("{\"type\":\"user\",\"toolUseResult\":{\"runId\":\"wf_stub-2\",\"workflowName\":\"launched-only\",\"scriptPath\":\"C:\\\\s\\\\wf2.js\"},\"message\":{\"content\":[]}}\n");
                 t.Append(Asst("{\"type\":\"text\",\"text\":\"Step one done, starting step two.\"}"));
                 t.Append("{\"type\":\"assistant\",\"isApiErrorMessage\":true,\"error\":\"billing_error\",\"apiErrorStatus\":400,\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Credit balance is too low\"}]}}\n");
                 string sd = Path.Combine(proj, sid);
@@ -176,6 +177,7 @@ public static class Stub {
     Check '-Recover shows the task list'           { $ro.Contains('- [x] step one') -and $ro.Contains('- [~] step two') }
     Check '-Recover lists files, sub-agents too'   { $ro.Contains("main-$([char]0xE9).txt - Edit x1") -and $ro.Contains('from-agent.txt - Write (sub-agent) x1') }
     Check '-Recover shows unfinished workflows'    { $ro.Contains('wf_stub-1') -and $ro.Contains('stub-fixes') -and $ro.Contains('1/2 agents finished; unfinished: fix:2') }
+    Check '-Recover knows workflows from launch'   { $ro.Contains('launched-only - status no end record') -and $ro.Contains('wf2.js') }
     Check '-Recover shows messages and tool calls' { $ro.Contains('Step one done, starting step two.') -and $ro.Contains('Bash: npm test') }
     Check '-Recover shows stderr'                  { $ro.Contains('stub warning line') }
     Check '-Recover saves report.md'               { [IO.File]::ReadAllText((Join-Path $job.dir 'report.md'), $utf8).Contains('brief text') }
@@ -234,6 +236,7 @@ public static class Stub {
     Check 'mode on-request was applied'            { $text.Contains('asks for "API workers"') }
     Check 'no placeholder left'                    { -not $text.Contains('{{') }
     Check 'rule points at the installed scripts'   { $text.Contains("$fakeHome\.claude\claude-worker\bin\claude-worker.ps1") }
+    Check 'rule explains the recovery commands'    { $text.Contains('claude-worker.ps1" -Recover <name>') -and $text.Contains('claude-worker.ps1" -ResumeRun <name>') -and $text.Contains('-Name <name>') }
     Check 'scripts are installed'                  { (Test-Path "$fakeHome\.claude\claude-worker\bin\claude-worker-lib.ps1") -and (Test-Path "$fakeHome\.claude\claude-worker\bin\claude-worker-runs.ps1") }
     Check 'backup holds the original file'         { [IO.File]::ReadAllText("$md.bak-claude-api-workers") -eq "# My rules`n`nKeep this.`n" }
     $i3 = Invoke-Child "& '$fakeHome\.claude\claude-worker\install.ps1'"

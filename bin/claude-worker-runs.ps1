@@ -289,7 +289,16 @@ function Get-TranscriptDigest([string]$Transcript) {
         $key = if ($who) { "$tool ($who)" } else { $tool }
         if ($files[$path].Contains($key)) { $files[$path][$key]++ } else { $files[$path][$key] = 1 }
     }
+    $launched = @{}   # runId -> the Workflow tool's own result (name, script), known from the launch
     foreach ($l in [IO.File]::ReadLines($Transcript, $script:RunsUtf8)) {
+        if ($l.Contains('"toolUseResult"') -and $l.Contains('"runId":"wf_')) {
+            try {
+                $r = ($l | ConvertFrom-Json).toolUseResult
+                if ($r.runId) { $launched[[string]$r.runId] = $r }
+            }
+            catch {}
+            continue
+        }
         if (-not $l.Contains('"type":"assistant"')) { continue }
         try { $j = $l | ConvertFrom-Json } catch { continue }
         if ($j.type -ne 'assistant' -or $j.isApiErrorMessage) { continue }
@@ -338,15 +347,20 @@ function Get-TranscriptDigest([string]$Transcript) {
     if (Test-Path -LiteralPath $wfJsonDir) { Get-ChildItem -LiteralPath $wfJsonDir -File -Filter 'wf_*.json' | ForEach-Object { $wfIds[$_.BaseName] = 1 } }
     $wfAgentsDir = Join-Path $subDir 'workflows'
     if (Test-Path -LiteralPath $wfAgentsDir) { Get-ChildItem -LiteralPath $wfAgentsDir -Directory -Filter 'wf_*' | ForEach-Object { $wfIds[$_.Name] = 1 } }
+    foreach ($id in $launched.Keys) { $wfIds[$id] = 1 }
     $wfLines = New-Object Collections.Generic.List[string]
     foreach ($id in $wfIds.Keys) {
-        $name = ''; $status = 'unknown'; $wfScript = ''; $err = ''
+        # <runId>.json is only written when the workflow ends
+        $name = ''; $status = 'no end record (still running when the worker stopped)'; $wfScript = ''; $err = ''
+        if ($launched.ContainsKey($id)) { $name = [string]$launched[$id].workflowName; $wfScript = [string]$launched[$id].scriptPath }
         $meta = Join-Path $wfJsonDir "$id.json"
         if (Test-Path -LiteralPath $meta) {
             try {
                 $w = [IO.File]::ReadAllText($meta, $script:RunsUtf8) | ConvertFrom-Json
-                $name = [string]$w.workflowName; if ($w.status) { $status = [string]$w.status }
-                $wfScript = [string]$w.scriptPath; if ($w.error) { $err = Get-OneLine ([string]$w.error) 200 }
+                if ($w.workflowName) { $name = [string]$w.workflowName }
+                $status = if ($w.status) { [string]$w.status } else { 'unknown' }
+                if ($w.scriptPath) { $wfScript = [string]$w.scriptPath }
+                if ($w.error) { $err = Get-OneLine ([string]$w.error) 200 }
             }
             catch {}
         }

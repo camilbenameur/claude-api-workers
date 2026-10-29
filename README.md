@@ -52,7 +52,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\claude-worker
 
 | Path | Role |
 |---|---|
-| `~/.claude/claude-worker/bin/claude-worker[.ps1]` | Runs a worker: loads the key, removes the variables the parent session passes down, runs `claude -p`. |
+| `~/.claude/claude-worker/bin/claude-worker[.ps1]` | Runs a worker: loads the key, removes the variables the parent session passes down, runs `claude -p`, records the run. Also lists, inspects and resumes runs. |
+| `~/.claude/claude-worker/bin/claude-worker-runs.{ps1,sh}`, `claude-worker-digest.py` | Run records, failure detection, recovery report (the Python digest is used on macOS and Linux). |
 | `~/.claude/claude-worker/bin/set-worker-key[.ps1]` | Stores the key (hidden prompt, or `--from <fingerprint>`), plus `--status` and `--remove`. |
 | `~/.claude/claude-worker/bin/find-api-keys[.ps1]` | Lists the Anthropic keys already on the machine, masked. `--check` tests them, `--json` is for agents. |
 | Block in `~/.claude/CLAUDE.md` | The rule every session reads: when and how to delegate to a worker, and what to do on failure. |
@@ -66,7 +67,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\claude-worker
 The installed rule tells the agent to write a self-contained brief and launch a worker in the background:
 
 ```bash
-~/.claude/claude-worker/bin/claude-worker --prompt-file brief.md --model sonnet \
+~/.claude/claude-worker/bin/claude-worker --prompt-file brief.md --name fix-auth --model sonnet \
   --cwd ~/my-project --out-file out.json --permission-mode acceptEdits --output-format json
 ```
 
@@ -75,7 +76,33 @@ The installed rule tells the agent to write a self-contained brief and launch a 
 - **Result:** `out.json` holds the final report in `result`, plus `total_cost_usd`.
 - **Other options:** any option the wrapper doesn't know is passed to `claude` as is.
 
-Exit codes: claude's own code, or `2` for a key or input problem, `3` when called from inside a worker, `127` when `claude` is not on PATH.
+Exit codes: claude's own code (`1` when claude exits 0 but reports an error), or `2` for a key or input problem, `3` when called from inside a worker, `127` when `claude` is not on PATH.
+
+## When a worker fails: recover its context
+
+A worker that has run for an hour holds context the calling session can't rebuild, and a crash (credit exhausted, expired key, API outage, network cut, killed process, or the calling session itself closing) used to lose it. Now every run is recorded, and a failed or cut-off run can be inspected and continued in the same conversation.
+
+```bash
+claude-worker --runs                    # every run and its state: running, succeeded, failed (reason), interrupted, orphaned
+claude-worker --recover fix-auth        # recovery report (by name, run id, session id prefix, or "last")
+claude-worker --resume-run fix-auth     # continue the same conversation, with its whole context
+```
+On Windows: `-Runs`, `-Recover <name>`, `-ResumeRun <name>`.
+
+- **Detection.** When claude stops, the launcher reads the JSON result (`is_error`, `terminal_reason`, `api_error_status`), the last message of the transcript and stderr. It sorts the failure into `credit`, `auth`, `rate_limit`, `overloaded`, `server`, `network`, `request`, `max_turns`, `budget`, `bg_timeout`, `killed` or `unknown`, then prints `run <id> failed (<reason>): <detail>` with the two recovery commands. If claude exited 0 but reported an error, the exit code becomes 1. A run whose launcher disappeared without recording an end shows up as `interrupted`, or as `orphaned` while claude is still running.
+- **Recovery report.** It is built from Claude Code's own transcript of the worker (`~/.claude/projects/<folder>/<session>.jsonl`, plus the sub-agent and workflow files next to it), and from the run record:
+  - status, reason and what to do next;
+  - the brief;
+  - the worker's last task list;
+  - its workflows: name, script, agents finished and agents left unfinished, with the run id for `resumeFromRunId`;
+  - the files it changed, sub-agents included;
+  - its last messages and tool calls;
+  - the commits and changes in git since it started;
+  - stderr.
+
+  The report is printed and saved as `report.md`. On macOS and Linux, the transcript part needs `python3`. Without it, the report keeps everything else.
+- **Resume.** `--resume-run` runs `claude -p --resume <session>` with the run's model, folder, options and output file. It tells the worker why it stopped, and asks it to check the files, finish only what is left, and resume an unfinished workflow if it can. Tested on real Opus workers killed mid-task and mid-workflow: they kept the files already written and finished the rest. Add `--prompt` to give other instructions. A run that crashed before saving any conversation is replayed from its brief under the same session id.
+- **Run files** live in `<worker home>/runs/<id>/`, next to the key store: `%LOCALAPPDATA%\claude-worker` on Windows, `~/.config/claude-worker` (mode 700) elsewhere. They hold `run.info`, the brief, stderr, the git state at start and the last report. They never contain the key. They are not cleaned up automatically, so delete old ones when you like.
 
 ## Safety model
 
@@ -106,6 +133,7 @@ Exit codes: claude's own code, or `2` for a key or input problem, `3` when calle
 - **Tested so far:**
   - end to end on Windows 11: a fresh Claude Code session, given only "Install <url> in always mode, don't ask again" in a sandboxed profile, installed everything, listed the keys masked (a valid one, plus a planted revoked one flagged invalid), stored nothing itself, and handed back the `-From <fingerprint>` command;
   - Windows 11 with Windows PowerShell 5.1, against the real API;
+  - crash recovery on Windows with real Opus workers: credit and invalid-key errors (through a local fake API) were classified correctly; a worker killed after 3 of 6 files, and another killed in the middle of a 4-agent workflow, were both resumed with `-ResumeRun`, kept the work already done (the workflow resumed with `resumeFromRunId`, finished agents served from cache) and finished the rest;
   - the bash scripts under Ubuntu (WSL) and Git Bash, with a stub `claude` (`tests/`).
   - macOS should work (bash 3.2 compatible, `shasum` fallback) but hasn't been tested yet. Reports are welcome.
 

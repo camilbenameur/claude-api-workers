@@ -83,7 +83,7 @@ shopt -u patsub_replacement 2>/dev/null || true
 rule=$(cat "$src/rules/rule.md")
 mode_rule=$(cat "$src/rules/mode-$mode.md")
 notes='   - A "claude.ai connectors are disabled" line on stderr is expected.'
-run_example="\"$bin/claude-worker\" --prompt-file \"<brief.md>\" --model sonnet --cwd \"<project dir>\" --out-file \"<scratchpad>/out-<name>.json\" --permission-mode acceptEdits --output-format json"
+run_example="\"$bin/claude-worker\" --prompt-file \"<brief.md>\" --name <name> --model sonnet --cwd \"<project dir>\" --out-file \"<scratchpad>/out-<name>.json\" --permission-mode acceptEdits --output-format json"
 rule=${rule//'{{MODE_RULE}}'/$mode_rule}
 rule=${rule//'{{DATE}}'/$(date +%Y-%m-%d)}
 rule=${rule//'{{REPO_URL}}'/$repo_url}
@@ -92,6 +92,11 @@ rule=${rule//'{{RUN_EXAMPLE}}'/$run_example}
 rule=${rule//'{{PLATFORM_NOTES}}'/$notes}
 rule=${rule//'{{SETKEY_CMD}}'/\"$bin/set-worker-key\"}
 rule=${rule//'{{STATUS_CMD}}'/\"$bin/set-worker-key\" --status}
+rule=${rule//'{{RUNS_CMD}}'/\"$bin/claude-worker\" --runs}
+rule=${rule//'{{RECOVER_CMD}}'/\"$bin/claude-worker\" --recover}
+rule=${rule//'{{RESUME_CMD}}'/\"$bin/claude-worker\" --resume-run}
+prompt_opt='`--prompt "..."` or `--prompt-file <file>`'
+rule=${rule//'{{PROMPT_OPT}}'/$prompt_opt}
 block="$begin"$'\n'"$rule"$'\n'"$end"
 
 rest=$(other_content)
