@@ -12,7 +12,7 @@ If you are yourself a worker or one of its agents (your system prompt says so, o
 1. Write a self-contained brief to a file in your scratchpad. The worker sees nothing of your conversation: give the goal, the files, the constraints, what is already ruled out and the expected deliverable. For parallel work, write explicitly "use a workflow (the user asked for it)", because a worker may not call Workflow without that opt-in. Ask the worker to also write its final report, listing the files it changed, to `<scratchpad>/result-<name>.md`.
 2. Launch it in the background (`run_in_background: true`) with your {{SHELL_TOOL}} tool:
    `{{RUN_EXAMPLE}}`
-   - The JSON's `result` field is the final report: the worker waits for its own workflow to finish. `total_cost_usd` is what it cost, and `is_error` flags a failure.
+   - The JSON's `result` field is the final report: the worker waits for its own workflow to finish, however long it takes (the launcher sets `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0`; without it `claude -p` would stop the workflow 10 minutes after the worker's last turn). `total_cost_usd` is what it cost, and `is_error` flags a failure.
    - Permission mode: pass the mode your session runs in. Use `bypassPermissions` only if this session already runs in it; otherwise use `acceptEdits`, where the worker can read and edit files but cannot run shell commands that need approval.
    - Only point a worker at folders the user trusts: it loads that folder's Claude Code settings and hooks, and runs with the key in its environment.
 {{PLATFORM_NOTES}}

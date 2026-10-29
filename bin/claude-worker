@@ -71,6 +71,9 @@ for v in $(compgen -e); do cw_should_drop "$v" && unset "$v"; done
 export ANTHROPIC_API_KEY="$key" CLAUDE_WORKER=1
 unset key
 [ -n "${CLAUDE_WORKER_BASE_URL:-}" ] && export ANTHROPIC_BASE_URL="$CLAUDE_WORKER_BASE_URL"
+# claude -p stops background tasks 10 minutes after its last turn, which would kill a workflow
+# the worker started. 0 = wait for them. A value kept through CLAUDE_WORKER_KEEP_ENV wins.
+[ -n "${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-}" ] || export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
 
 guard='You are an API worker started by another Claude Code session: you are already billed to the API key. Never call claude-worker; to parallelize, use your Task or Workflow tools directly.'
 base=(-p --model "$model" --append-system-prompt "$guard")

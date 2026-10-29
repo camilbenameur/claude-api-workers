@@ -86,6 +86,7 @@ public static class Stub {
         o.WriteLine("LEAK=" + env("CLAUDE_CODE_FAKE") + "/" + env("ANTHROPIC_BASE_URL") + "/" + env("CLAUDECODE"));
         o.WriteLine("WORKER=" + env("CLAUDE_WORKER"));
         o.WriteLine("KEEP=" + env("CLAUDE_CODE_GIT_BASH_PATH") + "/" + env("CLAUDE_CODE_KEEPME"));
+        o.WriteLine("BGWAIT=" + env("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"));
         o.WriteLine("PWD=" + Environment.CurrentDirectory);
         o.WriteLine("ARGS=" + string.Join(" | ", a));
         o.WriteLine("STDIN=" + stdin.TrimEnd());
@@ -94,7 +95,7 @@ public static class Stub {
 }
 '@
     $env:PATH = "$tmp\stub;$env:PATH"
-    $env:CLAUDE_CODE_FAKE = 'leak'; $env:ANTHROPIC_BASE_URL = 'http://example.invalid'; $env:CLAUDECODE = '1'
+    $env:CLAUDE_CODE_FAKE = 'leak'; $env:ANTHROPIC_BASE_URL = 'http://example.invalid'; $env:CLAUDECODE = '1'; $env:CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = '600000'
     $env:CLAUDE_CODE_GIT_BASH_PATH = 'C:\Git\bin\bash.exe'; $env:CLAUDE_CODE_KEEPME = 'yes'; $env:CLAUDE_WORKER_KEEP_ENV = 'CLAUDE_CODE_KEEPME'
     [IO.File]::WriteAllText("$tmp\brief.md", "h$([char]0xE9)llo `"quoted`" from a file", $utf8)
     $w = Invoke-Child "& '$bin\claude-worker.ps1' -PromptFile '$tmp\brief.md' -Cwd '$tmp\work dir' --output-format json --json-schema '{`"a`":`"b c`"}'"
@@ -107,14 +108,18 @@ public static class Stub {
     Check 'inline JSON reaches claude intact'      { $o.Contains('--output-format | json | --json-schema | {"a":"b c"}') }
     Check 'parent environment is untouched'        { $env:CLAUDE_CODE_FAKE -eq 'leak' }
     Check 'keeps GIT_BASH_PATH and KEEP_ENV names'  { $o.Contains('KEEP=C:\Git\bin\bash.exe/yes') }
+    Check 'waits for background workflows'         { $o.Contains('BGWAIT=0') }
     $ext = Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x --foo -Model haiku bar"
     Check 'claude options are not bound to ours'   { $ext.Out.Contains('haiku | --append-system-prompt') -and $ext.Out.Contains('| --foo | bar') }
     $null = Invoke-Child "& '$bin\claude-worker.ps1' -Prompt 'caf$([char]0xE9)' -OutFile '$tmp\out.txt'"
     Check '-OutFile writes UTF-8 with accents'     { [IO.File]::ReadAllText("$tmp\out.txt", $utf8).Contains("STDIN=caf$([char]0xE9)") }
     $st = Invoke-Child "& '$bin\claude-worker.ps1' -SelfTest"
     Check '-SelfTest passes'                       { $st.Code -eq 0 -and $st.Out.Contains('apiKeySource=ANTHROPIC_API_KEY') }
+    # Compare before/after: real workers running elsewhere keep their own fast-mode file
+    $fastBefore = @(Get-ChildItem ([IO.Path]::GetTempPath()) -Filter 'claude-worker-fast-*.json' | ForEach-Object Name)
     $fw = Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x -Model opus -Fast"
-    Check '-Fast sends the fast mode settings'     { $fw.Out.Contains('--model | opus') -and $fw.Out.Contains('| --settings |') -and -not (Get-ChildItem ([IO.Path]::GetTempPath()) -Filter 'claude-worker-fast-*.json') }
+    $fastLeft = @(Get-ChildItem ([IO.Path]::GetTempPath()) -Filter 'claude-worker-fast-*.json' | Where-Object { $fastBefore -notcontains $_.Name })
+    Check '-Fast sends the fast mode settings'     { $fw.Out.Contains('--model | opus') -and $fw.Out.Contains('| --settings |') -and $fastLeft.Count -eq 0 }
     Check 'refuses to run inside a worker (3)'     { (Invoke-Child "`$env:CLAUDE_WORKER = '1'; & '$bin\claude-worker.ps1' -Prompt x").Code -eq 3 }
     Check 'missing cwd exits 2'                    { (Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x -Cwd '$tmp\nope'").Code -eq 2 }
     Check 'quote in cwd exits 2'                   { (Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x -Cwd 'C:\x`" --model y'").Code -eq 2 }
@@ -122,7 +127,7 @@ public static class Stub {
     Check 'corrupt key file exits 2'               { (Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x").Code -eq 2 }
     $null = Invoke-Child "& '$bin\set-worker-key.ps1' -Remove"
     Check 'no stored key exits 2'                  { (Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x").Code -eq 2 }
-    foreach ($v in 'CLAUDE_CODE_FAKE', 'ANTHROPIC_BASE_URL', 'CLAUDECODE', 'CLAUDE_CODE_GIT_BASH_PATH', 'CLAUDE_CODE_KEEPME', 'CLAUDE_WORKER_KEEP_ENV') { Remove-Item "Env:$v" }
+    foreach ($v in 'CLAUDE_CODE_FAKE', 'ANTHROPIC_BASE_URL', 'CLAUDECODE', 'CLAUDE_CODE_GIT_BASH_PATH', 'CLAUDE_CODE_KEEPME', 'CLAUDE_WORKER_KEEP_ENV', 'CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS') { Remove-Item "Env:$v" }
     $two = Invoke-Child "& '$ps' -NoProfile -ExecutionPolicy Bypass -File '$bin\find-api-keys.ps1' -Json -Root '$fakeHome\proj,$fakeHome\other'"
     Check '-Root a,b works through -File'          { $r2 = $two.Out | ConvertFrom-Json; @($r2.scanned.roots).Count -eq 2 -and @($r2.candidates.fingerprint) -contains $fp2 }
 

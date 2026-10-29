@@ -69,6 +69,9 @@ $env:ANTHROPIC_API_KEY = $key
 $key = $null
 $env:CLAUDE_WORKER = '1'
 if ($env:CLAUDE_WORKER_BASE_URL) { $env:ANTHROPIC_BASE_URL = $env:CLAUDE_WORKER_BASE_URL }
+# claude -p stops background tasks 10 minutes after its last turn, which would kill a workflow
+# the worker started. 0 = wait for them. A value kept through CLAUDE_WORKER_KEEP_ENV wins.
+if (-not $env:CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS) { $env:CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS = '0' }
 
 $utf8 = New-Object Text.UTF8Encoding $false
 $guard = 'You are an API worker started by another Claude Code session: you are already billed to the API key. Never call claude-worker; to parallelize, use your Task or Workflow tools directly.'

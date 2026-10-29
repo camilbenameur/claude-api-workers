@@ -68,13 +68,14 @@ echo "KEYFP=$(printf '%s' "${ANTHROPIC_API_KEY:-}" | (sha256sum 2>/dev/null || s
 echo "LEAK=${CLAUDE_CODE_FAKE:-none}/${ANTHROPIC_BASE_URL:-none}/${CLAUDECODE:-none}"
 echo "WORKER=${CLAUDE_WORKER:-}"
 echo "KEEP=${CLAUDE_CODE_GIT_BASH_PATH:-none}/${CLAUDE_CODE_KEEPME:-none}"
+echo "BGWAIT=${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-none}"
 echo "PWD=$PWD"
 echo "ARGS=$*"
 echo "STDIN=$stdin"
 STUB
 chmod +x "$tmp/stub/claude"
 export PATH="$tmp/stub:$PATH"
-export CLAUDE_CODE_FAKE=leak ANTHROPIC_BASE_URL=http://example.invalid CLAUDECODE=1
+export CLAUDE_CODE_FAKE=leak ANTHROPIC_BASE_URL=http://example.invalid CLAUDECODE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=600000
 export CLAUDE_CODE_GIT_BASH_PATH=/opt/git/bash CLAUDE_CODE_KEEPME=yes CLAUDE_WORKER_KEEP_ENV=CLAUDE_CODE_KEEPME
 mkdir -p "$tmp/work dir"
 out=$("$bin/claude-worker" --prompt "héllo \"quoted\"" --cwd "$tmp/work dir" --output-format json --json-schema '{"a":"b c"}')
@@ -86,6 +87,7 @@ check "prompt arrives on stdin intact"         '[[ $out == *"STDIN=héllo \"quot
 check "unknown options reach claude"           '[[ $out == *"--output-format json --json-schema {\"a\":\"b c\"}"* ]]'
 check "parent environment is untouched"        '[ "$CLAUDE_CODE_FAKE" = leak ]'
 check "keeps GIT_BASH_PATH and KEEP_ENV names" '[[ $out == *"KEEP=/opt/git/bash/yes"* ]]'
+check "waits for background workflows"         '[[ $out == *"BGWAIT=0"* ]]'
 case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) ;; *)
     ln -s "$bin/claude-worker" "$tmp/cw-link"
     check "works when called through a symlink" '[[ $("$tmp/cw-link" --prompt x) == *"KEYFP=$fp1"* ]]' ;;
@@ -104,7 +106,7 @@ check "CLAUDE_WORKER_KEY_HELPER wins"          'grep -q "KEYFP=$fp2" "$tmp/h.txt
 "$bin/set-worker-key" --remove > /dev/null
 "$bin/claude-worker" --prompt x > /dev/null 2>&1
 check "no stored key exits 2"                  '[ $? = 2 ]'
-unset CLAUDE_CODE_FAKE ANTHROPIC_BASE_URL CLAUDECODE CLAUDE_CODE_GIT_BASH_PATH CLAUDE_CODE_KEEPME CLAUDE_WORKER_KEEP_ENV
+unset CLAUDE_CODE_FAKE ANTHROPIC_BASE_URL CLAUDECODE CLAUDE_CODE_GIT_BASH_PATH CLAUDE_CODE_KEEPME CLAUDE_WORKER_KEEP_ENV CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
 check "find-api-keys --help has no code line"  '! "$bin/find-api-keys" --help | grep -q "set -u"'
 
 # --- install.sh (not on Windows shells: install.ps1 covers those)
