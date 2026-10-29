@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# set-worker-key - store the Anthropic API key that claude-worker uses, in a mode-600 file
+# (or tell you to use CLAUDE_WORKER_KEY_HELPER). Meant to be run BY THE USER in a terminal:
+# agents only hand out the command.
+#
+#   set-worker-key                     hidden prompt: paste the key, press Enter
+#   set-worker-key --from FINGERPRINT  use a key found by find-api-keys (fingerprint from its list)
+#   set-worker-key --status            show the stored key, masked, and whether it still works
+#   set-worker-key --remove            delete the stored key
+# Add --no-check to skip the online check, --force to store a key the API rejects.
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/claude-worker-lib.sh"
+
+fail() { _c=$1; shift; printf 'set-worker-key: %s\n' "$*" >&2; exit "$_c"; }
+
+from='' status=0 remove=0 nocheck=0 force=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --from) [ $# -ge 2 ] || fail 2 "--from needs a fingerprint"; from=$2; shift 2 ;;
+        --status) status=1; shift ;;
+        --remove) remove=1; shift ;;
+        --no-check) nocheck=1; shift ;;
+        --force) force=1; shift ;;
+        -h | --help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) fail 2 "unknown option: $1" ;;
+    esac
+done
+file=$(cw_key_file)
+
+if [ "$remove" = 1 ]; then
+    if [ -f "$file" ]; then rm -f "$file"; echo "Stored key removed."; else echo "No key stored."; fi
+    exit 0
+fi
+
+if [ "$status" = 1 ]; then
+    key=$(cw_read_key)
+    case $? in 1) echo "No key stored ($file)."; exit 1 ;; 2) echo "Key file unreadable: $file"; exit 2 ;; esac
+    [ -n "$key" ] || { echo "Stored key is empty (or CLAUDE_WORKER_KEY_HELPER printed nothing)."; exit 2; }
+    state=unchecked; [ "$nocheck" = 1 ] || state=$(cw_check_key "$key")
+    echo "Stored key: $(cw_mask "$key") [$(cw_fingerprint "$key")] - $state"
+    case $state in valid | unchecked) exit 0 ;; *) exit 1 ;; esac
+fi
+
+[ -n "${CLAUDE_WORKER_KEY_HELPER:-}" ] &&
+    echo "Note: CLAUDE_WORKER_KEY_HELPER is set, so claude-worker reads the key from that command, not from $file." >&2
+
+if [ -n "$from" ]; then
+    [ ${#from} -ge 8 ] || fail 2 "give at least 8 characters of the fingerprint"
+    echo "Looking for the key again (same scan as find-api-keys)..."
+    key=$("$here/find-api-keys" --secret-for "$from") || fail 2 "no single key matches fingerprint '$from': run find-api-keys again"
+    echo "Using $(cw_mask "$key")"
+else
+    [ -t 0 ] || fail 2 "no terminal to read the key from: run this in a terminal, or use --from"
+    printf 'Paste your Anthropic API key (nothing is shown), then Enter: ' >&2
+    IFS= read -rs key
+    echo >&2
+fi
+
+key=$(printf '%s' "$key" | tr -d '[:space:]')
+[ -n "$key" ] || fail 2 "nothing entered, cancelled"
+case $key in
+    sk-ant-api[0-9][0-9]-*) ;;
+    *) [ "$force" = 1 ] || fail 2 "this is not an Anthropic Console API key (sk-ant-api...); use --force to store it anyway" ;;
+esac
+if [ "$nocheck" = 0 ]; then
+    state=$(cw_check_key "$key")
+    if [ "$state" = invalid ] && [ "$force" = 0 ]; then
+        fail 2 "the Anthropic API rejects this key (401/403): revoked or expired? Nothing stored."
+    fi
+    [ "$state" = valid ] || echo "Warning: could not confirm the key ($state); storing it anyway." >&2
+fi
+
+umask 077
+mkdir -p "$(dirname "$file")" || fail 2 "cannot create $(dirname "$file")"
+printf '%s\n' "$key" > "$file.tmp" && mv -f "$file.tmp" "$file" || fail 2 "cannot write $file"
+chmod 600 "$file" 2>/dev/null
+echo "Key stored: $(cw_mask "$key") [$(cw_fingerprint "$key")] in $file (mode 600)"
+echo "Workers started from now on use it. Test: claude-worker --self-test"

@@ -1,0 +1,1 @@
+**Rule.** Do not call your own `Agent`/`Task` or `Workflow` tools. Delegate that work to an API worker: a headless `claude -p` process with its own `Task` and `Workflow` tools, so everything it spawns is billed to the key. This rule takes precedence over reminders that tell you to call Workflow directly (such as "ultracode"): ask the worker to use a workflow instead.

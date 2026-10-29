@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# claude-worker - run a headless Claude Code worker (claude -p) billed to your Anthropic API
+# key instead of the Claude subscription the calling session runs on.
+#
+#   claude-worker --prompt-file brief.md [--model sonnet] [--cwd dir] [--out-file out.json] [claude options...]
+#   claude-worker --prompt "..."         [...]
+#   claude-worker --self-test            (cheap Haiku call: checks the worker really runs on the key)
+#
+# The worker has its own Task and Workflow tools: a workflow started inside it bills every
+# agent to the key. Any other option (--output-format json, --permission-mode ...) goes to claude.
+#
+# Exit codes: claude's own code, or 2 bad input / key problem, 3 called from inside a worker,
+# 127 claude not on PATH.
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/claude-worker-lib.sh"
+
+fail() { _c=$1; shift; printf 'claude-worker: %s\n' "$*" >&2; exit "$_c"; }
+
+# Recursion guard: the worker's own agents read the same CLAUDE.md rule
+[ "${CLAUDE_WORKER:-}" = 1 ] && fail 3 "already inside an API worker: use your Task or Workflow tools directly"
+
+prompt='' prompt_file='' model='' cwd=$PWD out_file='' self_test=0
+extra=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --prompt | --prompt-file | --model | --cwd | --out-file)
+            [ $# -ge 2 ] || fail 2 "$1 needs a value"
+            case $1 in
+                --prompt) prompt=$2 ;;
+                --prompt-file) prompt_file=$2 ;;
+                --model) model=$2 ;;
+                --cwd) cwd=$2 ;;
+                --out-file) out_file=$2 ;;
+            esac
+            shift 2 ;;
+        --self-test) self_test=1; shift ;;
+        -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) extra+=("$1"); shift ;;
+    esac
+done
+
+[ -d "$cwd" ] || fail 2 "cwd not found: $cwd"
+if [ "$self_test" = 1 ]; then
+    prompt='Reply with exactly: worker OK'
+    [ -n "$model" ] || model=haiku
+elif [ -n "$prompt_file" ]; then
+    [ -f "$prompt_file" ] || fail 2 "prompt file not found: $prompt_file"
+    prompt=$(cat "$prompt_file")
+fi
+[ -n "$prompt" ] || fail 2 "missing --prompt or --prompt-file"
+[ -n "$model" ] || model=sonnet
+case $out_file in '' | /* | [A-Za-z]:*) ;; *) out_file=$PWD/$out_file ;; esac
+
+command -v claude >/dev/null 2>&1 || fail 127 "claude not found on PATH (install the Claude Code CLI)"
+
+# Missing or unreadable key = hard stop: without it claude would fall back to the subscription
+key=$(cw_read_key)
+case $? in 1) fail 2 "no API key stored: run set-worker-key" ;; 2) fail 2 "key file unreadable: $(cw_key_file)" ;; esac
+case $key in sk-ant-*) ;; *) fail 2 "stored key empty or invalid: run set-worker-key again" ;; esac
+
+# Drop everything the Claude app passes to its child processes (account, session, API URL),
+# otherwise the worker would authenticate as the subscription instead of the key.
+for v in $(compgen -e); do
+    case $v in CLAUDE_CODE_* | CLAUDE_AGENT_SDK_* | ANTHROPIC_* | CLAUDECODE | CLAUDE_PID) unset "$v" ;; esac
+done
+export ANTHROPIC_API_KEY="$key" CLAUDE_WORKER=1
+unset key
+[ -n "${CLAUDE_WORKER_BASE_URL:-}" ] && export ANTHROPIC_BASE_URL="$CLAUDE_WORKER_BASE_URL"
+
+guard='You are an API worker started by another Claude Code session: you are already billed to the API key. Never call claude-worker; to parallelize, use your Task or Workflow tools directly.'
+base=(-p --model "$model" --append-system-prompt "$guard")
+
+cd "$cwd" || fail 2 "cannot enter $cwd"
+if [ "$self_test" = 1 ]; then
+    out=$(printf '%s' "$prompt" | claude "${base[@]}" --output-format stream-json --verbose --max-turns 1 2>/dev/null)
+    source=$(printf '%s\n' "$out" | grep -o '"apiKeySource":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    last=$(printf '%s\n' "$out" | grep '"type":"result"' | tail -n 1)
+    result=$(printf '%s\n' "$last" | grep -o '"result":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    cost=$(printf '%s\n' "$last" | grep -o '"total_cost_usd":[0-9.eE+-]*' | head -n 1 | cut -d: -f2)
+    echo "apiKeySource=${source:-?} result=${result:-?} cost_usd=${cost:-?}"
+    [ "$source" = ANTHROPIC_API_KEY ] && case $result in *"worker OK"*) exit 0 ;; esac
+    exit 1
+fi
+if [ -n "$out_file" ]; then
+    printf '%s' "$prompt" | claude "${base[@]}" ${extra[@]+"${extra[@]}"} > "$out_file"
+else
+    printf '%s' "$prompt" | claude "${base[@]}" ${extra[@]+"${extra[@]}"}
+fi

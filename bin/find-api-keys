@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# find-api-keys - list the Anthropic API keys already present on this machine, MASKED.
+# Never prints a full key: only a fingerprint (first 12 hex of SHA-256), the first 13 and last
+# 4 characters, and where each key was found. Nothing leaves the machine unless --check is
+# given, which asks the Anthropic API (and only it) whether each key still works.
+#
+#   find-api-keys [--json] [--check] [--root DIR]... [--max-depth 6]
+#
+# Looked at: exported environment variables, Claude Code settings and ~/.claude.json, shell
+# profiles, a few known tool configs, and .env-style files (.env, .env.*, *.env, .envrc) under
+# the home folder, skipping dependency/cache folders. Symlinks are not followed.
+# --secret-for FINGERPRINT is internal (used by set-worker-key): prints that one key.
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/claude-worker-lib.sh"
+
+json=0 check=0 max_depth=6 secret_for=''
+roots=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --json) json=1; shift ;;
+        --check) check=1; shift ;;
+        --root) [ $# -ge 2 ] || { echo "--root needs a value" >&2; exit 2; }; roots+=("$2"); shift 2 ;;
+        --max-depth) [ $# -ge 2 ] || { echo "--max-depth needs a value" >&2; exit 2; }; max_depth=$2; shift 2 ;;
+        --secret-for) [ $# -ge 2 ] || exit 2; secret_for=$(printf '%s' "$2" | tr 'A-F' 'a-f'); shift 2 ;;
+        -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+done
+[ ${#roots[@]} -gt 0 ] || roots=("$HOME")
+
+# hits: "fingerprint<TAB>place"   vals: "fingerprint<TAB>key" (mode 600, deleted on exit)
+umask 077
+hits=$(mktemp) && vals=$(mktemp) || exit 2
+trap 'rm -f "$hits" "$vals"' EXIT
+
+add_hit() {
+    _fp=$(cw_fingerprint "$1")
+    printf '%s\t%s\n' "$_fp" "$2" >> "$hits"
+    printf '%s\t%s\n' "$_fp" "$1" >> "$vals"
+}
+
+scan_file() {
+    [ -f "$1" ] && [ -r "$1" ] || return 0
+    grep -noE "$CW_KEY_PATTERN" "$1" 2>/dev/null | while IFS= read -r line; do
+        add_hit "${line#*:}" "file:$1:${line%%:*}"
+    done
+}
+
+# 1. Exported environment variables
+for name in $(compgen -e); do
+    val=${!name}
+    while [[ $val =~ $CW_KEY_PATTERN ]]; do
+        add_hit "${BASH_REMATCH[0]}" "env:$name"
+        val=${val#*"${BASH_REMATCH[0]}"}
+    done
+done
+
+# 2. Known config files
+config=${XDG_CONFIG_HOME:-$HOME/.config}
+for f in "$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json" "$HOME/.claude.json" \
+    "$HOME/.env" "$HOME/.envrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" \
+    "$HOME/.zshrc" "$HOME/.zshenv" "$HOME/.zprofile" "$HOME/.zlogin" "$config/fish/config.fish" \
+    "$HOME/.aider.conf.yml" "$HOME/.continue/config.json" "$HOME/.continue/config.yaml" \
+    "$config/io.datasette.llm/keys.json" "$HOME/Library/Application Support/io.datasette.llm/keys.json"; do
+    scan_file "$f"
+done
+
+# 3. .env-style files under the roots
+for r in "${roots[@]}"; do
+    [ -d "$r" ] || continue
+    find "$r" -maxdepth "$max_depth" \
+        \( -type d \( -name node_modules -o -name .git -o -name .hg -o -name .svn -o -name .venv \
+        -o -name venv -o -name __pycache__ -o -name .cache -o -name .npm -o -name .yarn \
+        -o -name .pnpm-store -o -name .cargo -o -name .rustup -o -name .gradle -o -name .m2 \
+        -o -name .nuget -o -name Library -o -name .Trash -o -name site-packages -o -name .next \
+        -o -name .nuxt -o -name Pods -o -name DerivedData -o -name AppData \) -prune \) \
+        -o \( -type f \( -name '.env' -o -name '.env.*' -o -name '*.env' -o -name '.envrc' \) \
+        -size -1024k -print \) 2>/dev/null
+done | while IFS= read -r f; do scan_file "$f"; done
+
+fingerprints=$(cut -f1 "$hits" | awk '!seen[$0]++')
+
+# Internal: print the one key whose fingerprint starts with the given prefix
+if [ -n "$secret_for" ]; then
+    [ ${#secret_for} -ge 8 ] || exit 2
+    match=$(printf '%s\n' "$fingerprints" | grep -c "^$secret_for")
+    [ "$match" = 1 ] || exit 2
+    while IFS="$(printf '\t')" read -r fp v; do
+        case $fp in "$secret_for"*) printf '%s\n' "$v"; exit 0 ;; esac
+    done < "$vals"
+    exit 2
+fi
+
+key_for() { while IFS="$(printf '\t')" read -r _f _v; do [ "$_f" = "$1" ] && { printf '%s' "$_v"; return; }; done < "$vals"; }
+json_str() { _s=$1; _s=${_s//\\/\\\\}; _s=${_s//\"/\\\"}; printf '"%s"' "$_s"; }
+
+stored=$(cw_read_key 2>/dev/null) || stored=''
+stored_fp=''; [ -n "$stored" ] && stored_fp=$(cw_fingerprint "$stored")
+unset stored
+
+count=0
+[ -n "$fingerprints" ] && count=$(printf '%s\n' "$fingerprints" | wc -l | tr -d ' ')
+[ "$json" = 1 ] && printf '{\n  "candidates": ['
+[ "$json" = 0 ] && { [ "$count" = 0 ] && echo "No Anthropic API key found." || echo "Found $count Anthropic API key(s), masked:"; }
+first=1
+for fp in $fingerprints; do
+    k=$(key_for "$fp")
+    masked=$(cw_mask "$k")
+    status=unchecked; [ "$check" = 1 ] && status=$(cw_check_key "$k")
+    unset k
+    is_stored=false; [ "$fp" = "$stored_fp" ] && is_stored=true
+    places=$(awk -F'\t' -v f="$fp" '$1 == f { print $2 }' "$hits" | awk '!seen[$0]++')
+    if [ "$json" = 1 ]; then
+        [ $first = 1 ] || printf ','
+        first=0
+        printf '\n    {"fingerprint": "%s", "masked": "%s", "status": "%s", "stored": %s, "sources": [' "$fp" "$masked" "$status" "$is_stored"
+        sep=''
+        while IFS= read -r p; do printf '%s%s' "$sep" "$(json_str "$p")"; sep=', '; done <<EOF
+$places
+EOF
+        printf ']}'
+    else
+        flags=$status; [ "$is_stored" = true ] && flags="$flags, stored for claude-worker"
+        echo "  [$fp] $masked  ($flags)"
+        printf '%s\n' "$places" | sed 's/^/      /'
+    fi
+done
+if [ "$json" = 1 ]; then
+    printf '\n  ],\n  "stored_key": %s,\n  "roots": [' "$([ -n "$stored_fp" ] && json_str "$stored_fp" || echo null)"
+    sep=''; for r in "${roots[@]}"; do printf '%s%s' "$sep" "$(json_str "$r")"; sep=', '; done
+    printf '],\n  "max_depth": %s\n}\n' "$max_depth"
+fi

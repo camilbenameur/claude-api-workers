@@ -1,0 +1,1 @@
+**Rule.** When the user asks for "API workers", or asks for sub-agents or a workflow to be billed to the API key, do not call your own `Agent`/`Task` or `Workflow` tools for that work. Delegate it to an API worker: a headless `claude -p` process with its own `Task` and `Workflow` tools, so everything it spawns is billed to the key. Otherwise, use your tools as usual.
