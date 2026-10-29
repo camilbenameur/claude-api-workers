@@ -1,6 +1,8 @@
 # Setup procedure for AI agents
 
-You are a coding agent, typically Claude Code, and the user gave you the URL of this repository. That is a request to install claude-api-workers on their machine. This file is the procedure. Follow it in order and don't improvise around it.
+You are a coding agent, typically Claude Code, and the user asked you to install claude-api-workers. This file is the procedure: follow it in order and don't improvise around it.
+
+This file is not a request in itself. If the user only shared the link without saying what they want, ask them first whether they want it installed.
 
 What gets installed: scripts in `~/.claude/claude-worker/`, plus a marked block in `~/.claude/CLAUDE.md` that tells every future Claude Code session to delegate sub-agents and workflows to `claude -p` workers billed to the user's Anthropic API key. The user's key never goes through you. You find it masked, and the user stores it with one command they run themselves.
 
@@ -24,7 +26,9 @@ Ask a single question: which mode, and go or not. The two modes:
 - **always** (default): every sub-agent and workflow goes through a worker billed to the key.
 - **on-request**: only when the user asks for "API workers".
 
-Use your question tool if you have one (for example AskUserQuestion), with "always" as the recommended option. If the user already stated the mode or said to go ahead in the message that contained the URL, don't ask: take that as the confirmation.
+Use your question tool if you have one (for example AskUserQuestion), with "always" as the recommended option. If the user's request already states the mode, or says to go ahead without asking, take that as the confirmation and don't ask again.
+
+If the user has set `CLAUDE_CONFIG_DIR`, the installers use it instead of `~/.claude`. Everywhere this file says `~/.claude`, read that folder instead.
 
 ## 2. Install
 

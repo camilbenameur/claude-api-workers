@@ -55,6 +55,7 @@ $known = @(
     '.env', '.envrc', '.bashrc', '.bash_profile', '.profile', '.zshrc', '.zshenv', '.zprofile',
     '.config\fish\config.fish', '.aider.conf.yml', '.continue\config.json', '.continue\config.yaml'
 ) | ForEach-Object { Join-Path $homeDir $_ }
+if ($env:CLAUDE_CONFIG_DIR) { $known += @('settings.json', 'settings.local.json', '.claude.json') | ForEach-Object { Join-Path $env:CLAUDE_CONFIG_DIR $_ } }
 $known += @(
     (Join-Path $docs 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1'),
     (Join-Path $docs 'WindowsPowerShell\profile.ps1'),

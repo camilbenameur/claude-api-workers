@@ -26,7 +26,7 @@ try {
     foreach ($d in "$fakeHome\proj\node_modules\pkg", "$fakeHome\other", "$tmp\stub", "$tmp\work dir") { New-Item -ItemType Directory -Force $d | Out-Null }
     $env:USERPROFILE = $fakeHome
     $env:CLAUDE_WORKER_HOME = Join-Path $tmp 'store'
-    foreach ($v in 'CLAUDE_WORKER', 'CLAUDE_WORKER_BASE_URL', 'ANTHROPIC_API_KEY') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
+    foreach ($v in 'CLAUDE_WORKER', 'CLAUDE_WORKER_BASE_URL', 'ANTHROPIC_API_KEY', 'CLAUDE_CONFIG_DIR') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
 
     $k1 = 'sk-ant-api03-' + ('A' * 40) + '1111'
     $k2 = 'sk-ant-api03-' + ('B' * 40) + '2222'
@@ -151,6 +151,9 @@ public static class Stub {
     $null = Invoke-Child "& '$repo\install.ps1' -Prefix '$tmp\tools'"
     $null = Invoke-Child "& '$repo\install.ps1' -Uninstall -Prefix '$tmp\tools'"
     Check 'uninstall spares foreign files'         { (Test-Path "$tmp\tools\keep.txt") -and -not (Test-Path "$tmp\tools\bin") }
+
+    $null = Invoke-Child "`$env:CLAUDE_CONFIG_DIR = '$tmp\cfg'; & '$repo\install.ps1'"
+    Check 'honours CLAUDE_CONFIG_DIR'              { (Test-Path "$tmp\cfg\claude-worker\bin\claude-worker.ps1") -and [IO.File]::ReadAllText("$tmp\cfg\CLAUDE.md").Contains('claude-api-workers:begin') }
 
     [IO.File]::WriteAllText($md, "# Mine`n<!-- claude-api-workers:begin -->`nhalf block`n`nMy later rules.`n")
     $bad = Invoke-Child "& '$repo\install.ps1'"

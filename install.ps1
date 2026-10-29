@@ -2,7 +2,7 @@
 #   install.ps1 [-Mode always|on-request] [-Prefix dir]   install or update (idempotent)
 #   install.ps1 -Uninstall [-Prefix dir]                  remove the scripts and the CLAUDE.md block
 # Copies the scripts (and this installer, for a later -Uninstall) to ~/.claude/claude-worker and
-# writes a marked block into ~/.claude/CLAUDE.md. The file as it was before the first install is
+# writes a marked block into ~/.claude/CLAUDE.md ($env:CLAUDE_CONFIG_DIR instead of ~/.claude if set). The file as it was before the first install is
 # kept as CLAUDE.md.bak-claude-api-workers. Never touches the stored API key.
 param(
     [ValidateSet('always', 'on-request')][string]$Mode = 'always',
@@ -11,7 +11,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $src = $PSScriptRoot
-$claudeDir = Join-Path $env:USERPROFILE '.claude'
+$claudeDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
 if (-not $Prefix) { $Prefix = Join-Path $claudeDir 'claude-worker' }
 $claudeMd = Join-Path $claudeDir 'CLAUDE.md'
 $backup = "$claudeMd.bak-claude-api-workers"

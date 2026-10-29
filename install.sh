@@ -3,13 +3,14 @@
 #   ./install.sh [--mode always|on-request] [--prefix DIR]   install or update (idempotent)
 #   ./install.sh --uninstall [--prefix DIR]                  remove the scripts and the CLAUDE.md block
 # Copies the scripts (and this installer, for a later --uninstall) to ~/.claude/claude-worker and
-# writes a marked block into ~/.claude/CLAUDE.md. The file as it was before the first install is
+# writes a marked block into ~/.claude/CLAUDE.md ($CLAUDE_CONFIG_DIR instead of ~/.claude if set). The file as it was before the first install is
 # kept as CLAUDE.md.bak-claude-api-workers. Never touches the stored API key.
 set -eu
 src=$(cd "$(dirname "$0")" && pwd)
 case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) echo "On Windows, run install.ps1 instead." >&2; exit 2 ;; esac
 
-mode=always uninstall=0 prefix="$HOME/.claude/claude-worker"
+claude_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+mode=always uninstall=0 prefix="$claude_dir/claude-worker"
 while [ $# -gt 0 ]; do
     case $1 in
         --mode) [ $# -ge 2 ] || { echo "--mode needs a value" >&2; exit 2; }; mode=$2; shift 2 ;;
@@ -21,7 +22,6 @@ while [ $# -gt 0 ]; do
 done
 case $mode in always | on-request) ;; *) echo "--mode must be always or on-request" >&2; exit 2 ;; esac
 
-claude_dir="$HOME/.claude"
 claude_md="$claude_dir/CLAUDE.md"
 backup="$claude_md.bak-claude-api-workers"
 begin='<!-- claude-api-workers:begin -->'

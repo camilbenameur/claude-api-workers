@@ -12,7 +12,7 @@ check() { if eval "$2"; then ok "$1"; else ko "$1"; fi; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export HOME="$tmp/home" CLAUDE_WORKER_HOME="$tmp/store"
-unset XDG_CONFIG_HOME CLAUDE_WORKER CLAUDE_WORKER_KEY_HELPER CLAUDE_WORKER_BASE_URL ANTHROPIC_API_KEY
+unset XDG_CONFIG_HOME CLAUDE_CONFIG_DIR CLAUDE_WORKER CLAUDE_WORKER_KEY_HELPER CLAUDE_WORKER_BASE_URL ANTHROPIC_API_KEY
 mkdir -p "$HOME/proj/node_modules/pkg" "$HOME/other" "$tmp/stub"
 
 k1="sk-ant-api03-$(printf 'A%.0s' $(seq 1 40))1111"
@@ -133,6 +133,9 @@ case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) echo "skip - install.sh tests (W
     printf '# Mine\n<!-- claude-api-workers:begin -->\nhalf block\n\nMy later rules.\n' > "$HOME/.claude/CLAUDE.md"
     bash "$repo/install.sh" > /dev/null 2>&1
     check "unbalanced markers are refused"     '[ $? = 2 ] && grep -q "My later rules." "$HOME/.claude/CLAUDE.md"'
+
+    CLAUDE_CONFIG_DIR="$tmp/cfg" bash "$repo/install.sh" > /dev/null
+    check "honours CLAUDE_CONFIG_DIR"          'grep -q "claude-api-workers:begin" "$tmp/cfg/CLAUDE.md" && [ -x "$tmp/cfg/claude-worker/bin/claude-worker" ]'
 
     printf '# Dotfiles\n' > "$tmp/dotfiles-claude.md"
     rm -f "$HOME/.claude/CLAUDE.md" && ln -s "$tmp/dotfiles-claude.md" "$HOME/.claude/CLAUDE.md"

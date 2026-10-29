@@ -70,7 +70,8 @@ for f in "$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json" "$HOM
     "$HOME/.env" "$HOME/.envrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" \
     "$HOME/.zshrc" "$HOME/.zshenv" "$HOME/.zprofile" "$HOME/.zlogin" "$config/fish/config.fish" \
     "$HOME/.aider.conf.yml" "$HOME/.continue/config.json" "$HOME/.continue/config.yaml" \
-    "$config/io.datasette.llm/keys.json" "$HOME/Library/Application Support/io.datasette.llm/keys.json"; do
+    "$config/io.datasette.llm/keys.json" "$HOME/Library/Application Support/io.datasette.llm/keys.json" \
+    ${CLAUDE_CONFIG_DIR:+"$CLAUDE_CONFIG_DIR/settings.json" "$CLAUDE_CONFIG_DIR/settings.local.json" "$CLAUDE_CONFIG_DIR/.claude.json"}; do
     scan_file "$f"
 done
 
