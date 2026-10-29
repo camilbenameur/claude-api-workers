@@ -27,7 +27,7 @@ backup="$claude_md.bak-claude-api-workers"
 begin='<!-- claude-api-workers:begin -->'
 end='<!-- claude-api-workers:end -->'
 repo_url='https://github.com/camilbenameur/claude-api-workers'
-scripts='claude-worker set-worker-key find-api-keys claude-worker-lib.sh'
+scripts='claude-worker set-worker-key find-api-keys claude-worker-lib.sh claude-worker-runs.sh claude-worker-digest.py'
 extras='install.sh rules/rule.md rules/mode-always.md rules/mode-on-request.md'
 
 # A begin marker without its end (or the reverse) means a hand-edited file: refuse to guess
@@ -75,7 +75,7 @@ if [ "$(cd "$prefix" && pwd)" != "$src" ]; then
     for f in $scripts; do cp -f "$src/bin/$f" "$prefix/bin/$f"; done
     for f in $extras; do cp -f "$src/$f" "$prefix/$f"; done
 fi
-chmod 755 "$prefix/bin/claude-worker" "$prefix/bin/set-worker-key" "$prefix/bin/find-api-keys" "$prefix/install.sh"
+chmod 755 "$prefix/bin/claude-worker" "$prefix/bin/set-worker-key" "$prefix/bin/find-api-keys" "$prefix/bin/claude-worker-digest.py" "$prefix/install.sh"
 bin="$prefix/bin"
 
 # 2. Rule block (literal replacements: bash 5.2 would otherwise expand & in the values)

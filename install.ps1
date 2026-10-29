@@ -19,7 +19,7 @@ $begin = '<!-- claude-api-workers:begin -->'
 $end = '<!-- claude-api-workers:end -->'
 $repoUrl = 'https://github.com/camilbenameur/claude-api-workers'
 $utf8 = New-Object Text.UTF8Encoding $false
-$scripts = 'claude-worker.ps1', 'set-worker-key.ps1', 'find-api-keys.ps1', 'claude-worker-lib.ps1'
+$scripts = 'claude-worker.ps1', 'set-worker-key.ps1', 'find-api-keys.ps1', 'claude-worker-lib.ps1', 'claude-worker-runs.ps1'
 $extras = 'install.ps1', 'rules\rule.md', 'rules\mode-always.md', 'rules\mode-on-request.md'
 
 # A begin marker without its end (or the reverse) means a hand-edited file: refuse to guess
