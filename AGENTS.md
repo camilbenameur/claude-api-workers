@@ -94,6 +94,7 @@ Tell the user, in a few lines:
 - that sessions started from now on follow the rule. Sessions already running read `~/.claude/CLAUDE.md` at startup, so they have to be told: if you can message the user's other sessions, offer to do it;
 - that only the delegated work is billed to the key. The session itself stays on whatever it already runs on, because the Claude desktop app always uses the claude.ai login;
 - how to uninstall: the installer copied itself to `~/.claude/claude-worker/`, so the uninstall command the installer printed keeps working after the clone is deleted. The stored key is removed separately with `set-worker-key -Remove` / `--remove`;
-- that workers should only be pointed at folders the user trusts. A worker loads that folder's Claude Code settings and runs with the key in its environment.
+- that workers should only be pointed at folders the user trusts. A worker loads that folder's Claude Code settings and runs with the key in its environment;
+- that a worker which fails (credit, key, API or network error) or gets cut off is not lost: the rule tells sessions to get its recovery report (`-Recover` / `--recover`) and to continue the same conversation (`-ResumeRun` / `--resume-run`).
 
 Delete the temporary clone when you're done.

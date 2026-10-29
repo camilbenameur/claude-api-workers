@@ -27,7 +27,7 @@ backup="$claude_md.bak-claude-api-workers"
 begin='<!-- claude-api-workers:begin -->'
 end='<!-- claude-api-workers:end -->'
 repo_url='https://github.com/camilbenameur/claude-api-workers'
-scripts='claude-worker set-worker-key find-api-keys claude-worker-lib.sh'
+scripts='claude-worker set-worker-key find-api-keys claude-worker-lib.sh claude-worker-runs.sh claude-worker-digest.py'
 extras='install.sh rules/rule.md rules/mode-always.md rules/mode-on-request.md'
 
 # A begin marker without its end (or the reverse) means a hand-edited file: refuse to guess
@@ -75,7 +75,7 @@ if [ "$(cd "$prefix" && pwd)" != "$src" ]; then
     for f in $scripts; do cp -f "$src/bin/$f" "$prefix/bin/$f"; done
     for f in $extras; do cp -f "$src/$f" "$prefix/$f"; done
 fi
-chmod 755 "$prefix/bin/claude-worker" "$prefix/bin/set-worker-key" "$prefix/bin/find-api-keys" "$prefix/install.sh"
+chmod 755 "$prefix/bin/claude-worker" "$prefix/bin/set-worker-key" "$prefix/bin/find-api-keys" "$prefix/bin/claude-worker-digest.py" "$prefix/install.sh"
 bin="$prefix/bin"
 
 # 2. Rule block (literal replacements: bash 5.2 would otherwise expand & in the values)
@@ -83,7 +83,7 @@ shopt -u patsub_replacement 2>/dev/null || true
 rule=$(cat "$src/rules/rule.md")
 mode_rule=$(cat "$src/rules/mode-$mode.md")
 notes='   - A "claude.ai connectors are disabled" line on stderr is expected.'
-run_example="\"$bin/claude-worker\" --prompt-file \"<brief.md>\" --model sonnet --cwd \"<project dir>\" --out-file \"<scratchpad>/out-<name>.json\" --permission-mode acceptEdits --output-format json"
+run_example="\"$bin/claude-worker\" --prompt-file \"<brief.md>\" --name <name> --model sonnet --cwd \"<project dir>\" --out-file \"<scratchpad>/out-<name>.json\" --permission-mode acceptEdits --output-format json"
 rule=${rule//'{{MODE_RULE}}'/$mode_rule}
 rule=${rule//'{{DATE}}'/$(date +%Y-%m-%d)}
 rule=${rule//'{{REPO_URL}}'/$repo_url}
@@ -92,6 +92,12 @@ rule=${rule//'{{RUN_EXAMPLE}}'/$run_example}
 rule=${rule//'{{PLATFORM_NOTES}}'/$notes}
 rule=${rule//'{{SETKEY_CMD}}'/\"$bin/set-worker-key\"}
 rule=${rule//'{{STATUS_CMD}}'/\"$bin/set-worker-key\" --status}
+rule=${rule//'{{RUNS_CMD}}'/\"$bin/claude-worker\" --runs}
+rule=${rule//'{{RECOVER_CMD}}'/\"$bin/claude-worker\" --recover}
+rule=${rule//'{{RESUME_CMD}}'/\"$bin/claude-worker\" --resume-run}
+prompt_opt='`--prompt "..."` or `--prompt-file <file>`'
+rule=${rule//'{{PROMPT_OPT}}'/$prompt_opt}
+rule=${rule//'{{FORCE_OPT}}'/--force}
 block="$begin"$'\n'"$rule"$'\n'"$end"
 
 rest=$(other_content)

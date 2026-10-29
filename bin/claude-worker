@@ -2,32 +2,41 @@
 # claude-worker - run a headless Claude Code worker (claude -p) billed to your Anthropic API
 # key instead of the Claude subscription the calling session runs on.
 #
-#   claude-worker --prompt-file brief.md [--model sonnet] [--cwd dir] [--out-file out.json] [claude options...]
+#   claude-worker --prompt-file brief.md [--name name] [--model sonnet] [--cwd dir] [--out-file out.json] [claude options...]
 #   claude-worker --prompt "..."         [...]
 #   claude-worker --self-test            (cheap Haiku call: checks the worker really runs on the key)
 #   add --fast to ask for fast mode (Opus). It is used when the key's organization has it,
 #   and the worker runs at standard speed otherwise. --self-test --model opus --fast shows which.
 #
+# Crash recovery: every run is recorded (its id is printed on stderr at start). When a worker
+# fails (credit, key, API or network error, killed...), the launcher says why, and:
+#   claude-worker --runs                        lists the runs and their state
+#   claude-worker --recover <id|name|last>      report: brief, progress, files changed, last messages, git
+#   claude-worker --resume-run <id|name|last>   continues the same conversation (claude --resume),
+#                                               same model, folder, options and output file
+#
 # The worker has its own Task and Workflow tools: a workflow started inside it bills every
 # agent to the key. Any other option (--output-format json, --permission-mode ...) goes to claude.
 #
-# Exit codes: claude's own code, or 2 bad input / key problem, 3 called from inside a worker,
-# 127 claude not on PATH.
+# Exit codes: claude's own code (1 when claude exits 0 but reports an error), or 2 bad input /
+# key problem, 3 called from inside a worker, 127 claude not on PATH.
 set -u
 s=$0; while [ -L "$s" ]; do d=$(cd "$(dirname "$s")" && pwd); s=$(readlink "$s"); case $s in /*) ;; *) s=$d/$s ;; esac; done
 here=$(cd "$(dirname "$s")" && pwd)
 . "$here/claude-worker-lib.sh" || { echo "claude-worker: cannot load claude-worker-lib.sh from $here" >&2; exit 2; }
+. "$here/claude-worker-runs.sh" || { echo "claude-worker: cannot load claude-worker-runs.sh from $here" >&2; exit 2; }
 
 fail() { _c=$1; shift; printf 'claude-worker: %s\n' "$*" >&2; exit "$_c"; }
 
 # Recursion guard: the worker's own agents read the same CLAUDE.md rule
 [ "${CLAUDE_WORKER:-}" = 1 ] && fail 3 "already inside an API worker: use your Task or Workflow tools directly"
 
-prompt='' prompt_file='' model='' cwd=$PWD out_file='' self_test=0 fast=0
+prompt='' prompt_file='' model='' cwd='' out_file='' name='' recover='' resume_run=''
+self_test=0 fast=0 list_runs=0 force=0
 extra=()
 while [ $# -gt 0 ]; do
     case $1 in
-        --prompt | --prompt-file | --model | --cwd | --out-file)
+        --prompt | --prompt-file | --model | --cwd | --out-file | --name | --recover | --resume-run)
             [ $# -ge 2 ] || fail 2 "$1 needs a value"
             case $1 in
                 --prompt) prompt=$2 ;;
@@ -35,15 +44,79 @@ while [ $# -gt 0 ]; do
                 --model) model=$2 ;;
                 --cwd) cwd=$2 ;;
                 --out-file) out_file=$2 ;;
+                --name) name=$2 ;;
+                --recover) recover=$2 ;;
+                --resume-run) resume_run=$2 ;;
             esac
             shift 2 ;;
         --self-test) self_test=1; shift ;;
         --fast) fast=1; shift ;;
-        -h | --help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --runs) list_runs=1; shift ;;
+        --force) force=1; shift ;;
+        -h | --help) sed -n '2,22p' "$s" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) extra+=("$1"); shift ;;
     esac
 done
 
+# Run records hold the brief and the output: private to this user, like the key. claude itself
+# gets the caller's umask back, so the files it writes in the project keep their usual modes.
+caller_umask=$(umask)
+umask 077
+
+fast_file=''
+cleanup() { [ -n "$fast_file" ] && rm -f "$fast_file"; cw_run_unlock; }
+trap cleanup EXIT
+
+if [ "$list_runs" = 1 ]; then
+    root=$(cw_runs_root); dirs=()
+    for d in "$root"/*/; do [ -f "$d/run.info" ] && dirs+=("${d%/}"); done
+    [ ${#dirs[@]} -gt 0 ] || { echo 'No worker runs recorded.'; exit 0; }
+    printf '%-40s %-22s %-25s %s\n' ID STATE STARTED FOLDER
+    start=$((${#dirs[@]} > 30 ? ${#dirs[@]} - 30 : 0))
+    for d in "${dirs[@]:$start}"; do
+        cw_run_load "$d"; st=$(cw_run_state); [ -n "$R_reason" ] && st="$st ($R_reason)"
+        printf '%-40s %-22s %-25s %s\n' "$R_id" "$st" "$R_started" "$R_cwd"
+    done
+    [ "$start" -gt 0 ] && echo "($start older runs in $root)"
+    exit 0
+fi
+
+if [ -n "$recover" ]; then
+    cw_run_find "$recover" || fail 2 "no run matches '$recover' (see --runs)"
+    report=$(cw_run_report)
+    printf '%s\n' "$report" > "$R_dir/report.md"
+    [ -n "$out_file" ] && printf '%s\n' "$report" > "$out_file"
+    printf '%s\n' "$report"
+    exit 0
+fi
+
+resuming=0 resume_transcript=0
+if [ -n "$resume_run" ]; then
+    cw_run_find "$resume_run" || fail 2 "no run matches '$resume_run' (see --runs)"
+    # Held until this launcher exits: two resumes of one run must not drive the same session
+    cw_run_lock || fail 2 "run $R_id is being started or resumed by another launcher"
+    state=$(cw_run_state)
+    if [ "$force" = 0 ]; then
+        case $state in
+            running) fail 2 "run $R_id is still running (launcher PID $R_launcher_pid). If you are sure it is not, add --force" ;;
+            orphaned) fail 2 "claude is still running for run $R_id (PID $R_claude_pid): wait for it or stop it, or add --force" ;;
+            succeeded) fail 2 "run $R_id already succeeded. To continue it anyway, add --force (and a --prompt)" ;;
+        esac
+    fi
+    [ -n "$R_session_id" ] || fail 2 "run $R_id has no session id: it cannot be resumed"
+    [ -z "$cwd" ] || [ "$cwd" = "$R_cwd" ] || fail 2 "a resumed run keeps its folder ($R_cwd): drop --cwd"
+    resuming=1 cwd=$R_cwd
+    [ -n "$model" ] || model=$R_model
+    [ "$R_fast" = 1 ] && fast=1
+    [ -n "$out_file" ] || out_file=$R_out_file
+    cw_transcript > /dev/null && resume_transcript=1
+    if [ -z "$prompt" ] && [ -z "$prompt_file" ]; then
+        # No conversation was saved (claude failed at start): replay the original brief
+        if [ "$resume_transcript" = 1 ]; then prompt=$(cw_resume_prompt); else prompt=$(cat "$R_dir/prompt.md"); fi
+    fi
+fi
+
+[ -n "$cwd" ] || cwd=$PWD
 [ -d "$cwd" ] || fail 2 "cwd not found: $cwd"
 if [ "$self_test" = 1 ]; then
     prompt='Reply with exactly: worker OK'
@@ -71,6 +144,9 @@ for v in $(compgen -e); do cw_should_drop "$v" && unset "$v"; done
 export ANTHROPIC_API_KEY="$key" CLAUDE_WORKER=1
 unset key
 [ -n "${CLAUDE_WORKER_BASE_URL:-}" ] && export ANTHROPIC_BASE_URL="$CLAUDE_WORKER_BASE_URL"
+# claude -p stops background tasks 10 minutes after its last turn, which would kill a workflow
+# the worker started. 0 = wait for them. A value kept through CLAUDE_WORKER_KEEP_ENV wins.
+[ -n "${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-}" ] || export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0
 
 guard='You are an API worker started by another Claude Code session: you are already billed to the API key. Never call claude-worker; to parallelize, use your Task or Workflow tools directly.'
 base=(-p --model "$model" --append-system-prompt "$guard")
@@ -79,7 +155,6 @@ base=(-p --model "$model" --append-system-prompt "$guard")
 # decides per organization: without access, the worker simply runs at standard speed.
 if [ "$fast" = 1 ]; then
     fast_file=$(mktemp) || fail 2 "cannot create a temporary file"
-    trap 'rm -f "$fast_file"' EXIT
     printf '{"fastMode": true}' > "$fast_file"
     base+=(--settings "$fast_file")
 fi
@@ -98,9 +173,90 @@ if [ "$self_test" = 1 ]; then
     [ "$source" = ANTHROPIC_API_KEY ] && case $result in *"worker OK"*) exit 0 ;; esac
     exit 1
 fi
-if [ -n "$out_file" ]; then
-    umask 077
-    printf '%s' "$prompt" | "$claude_bin" "${base[@]}" ${extra[@]+"${extra[@]}"} > "$out_file"
+
+# claude options without the ones that pick a session (a resume chooses its own), in $options
+drop_session_flags() {
+    options=() skip=0
+    for a in "$@"; do
+        if [ "$skip" = 1 ]; then skip=0; case $a in -*) ;; *) continue ;; esac; fi
+        case $a in
+            --session-id | --resume | -r) skip=1; continue ;;   # --resume may come without a value
+            --continue | -c | --fork-session) continue ;;
+        esac
+        options+=("$a")
+    done
+}
+
+if [ "$resuming" = 1 ]; then
+    # Resume: same session, the options of the earlier attempts, then the new ones (claude keeps
+    # the last value of an option). They are saved for the next resume.
+    drop_session_flags ${R_args[@]+"${R_args[@]}"}; earlier=(${options[@]+"${options[@]}"})
+    drop_session_flags ${extra[@]+"${extra[@]}"}
+    R_args=(${earlier[@]+"${earlier[@]}"} ${options[@]+"${options[@]}"})
+    if [ "$resume_transcript" = 1 ]; then session_args=(--resume "$R_session_id"); else session_args=(--session-id "$R_session_id"); fi
+    line=(${R_args[@]+"${R_args[@]}"} "${session_args[@]}")
+    # The output file is rewritten: keep the previous attempt's result next to the run
+    if [ -n "$out_file" ] && [ -s "$out_file" ]; then
+        ext=''; case ${out_file##*/} in *.*) ext=".${out_file##*.}" ;; esac
+        cp -f "$out_file" "$R_dir/out-attempt-$R_attempts$ext"
+    fi
+    R_attempts=$((R_attempts + 1))
+    printf '%s' "$prompt" > "$R_dir/resume-$R_attempts.md"
+    R_model=$model R_fast=$fast R_out_file=$out_file
+    R_status=running R_reason='' R_detail='' R_exit_code='' R_ended=''
 else
-    printf '%s' "$prompt" | "$claude_bin" "${base[@]}" ${extra[@]+"${extra[@]}"}
+    # A session id chosen here lets --resume-run find the conversation later
+    sid='' session_args=() prev=''
+    for a in ${extra[@]+"${extra[@]}"}; do [ "$prev" = --session-id ] && sid=$a; prev=$a; done
+    if [ -z "$sid" ]; then
+        own=1
+        for a in ${extra[@]+"${extra[@]}"}; do case $a in --resume | -r | --continue | -c | --fork-session) own=0 ;; esac; done
+        [ "$own" = 1 ] && { sid=$(cw_uuid); session_args=(--session-id "$sid"); }
+    fi
+    cw_run_new "$name" "$sid" || fail 2 "cannot create the run folder in $(cw_runs_root)"
+    cw_run_lock
+    R_cwd=$PWD R_model=$model R_fast=$fast R_out_file=$out_file
+    R_args=(${extra[@]+"${extra[@]}"})
+    if command -v git >/dev/null 2>&1 && R_git_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+        R_git_head=$(git rev-parse --verify -q HEAD 2>/dev/null) || R_git_head=''
+        git status --porcelain > "$R_dir/git-start.txt" 2>/dev/null
+    else
+        R_git_root=''
+    fi
+    printf '%s' "$prompt" > "$R_dir/prompt.md"
+    line=(${extra[@]+"${extra[@]}"} ${session_args[@]+"${session_args[@]}"})
 fi
+R_launcher_pid=$$ R_claude_pid='' R_last_start=$(cw_now) R_last_start_epoch=$(date +%s)
+# Each attempt is judged on what it adds to stderr.log and to the transcript
+errlog="$R_dir/stderr.log"
+printf -- '--- attempt %s, %s ---\n' "$R_attempts" "$R_last_start" >> "$errlog"
+R_stderr_offset=$(wc -c < "$errlog" | tr -d ' ')
+R_transcript_offset=0
+t=$(cw_transcript) && R_transcript_offset=$(wc -c < "$t" | tr -d ' ')
+cw_run_save
+echo "claude-worker: run $R_id (session $R_session_id, attempt $R_attempts)" >&2
+
+# claude runs in the background so that its PID is recorded and a TERM/INT/HUP sent to the
+# launcher reaches it; stderr is kept in the run folder, then copied to ours. The output file
+# is created here, private; claude gets the caller's umask (exec keeps the subshell's PID).
+if [ -n "$out_file" ]; then
+    : > "$out_file"
+    printf '%s' "$prompt" | (umask "$caller_umask"; exec "$claude_bin" "${base[@]}" ${line[@]+"${line[@]}"}) > "$out_file" 2>> "$errlog" &
+else
+    printf '%s' "$prompt" | (umask "$caller_umask"; exec "$claude_bin" "${base[@]}" ${line[@]+"${line[@]}"}) 2>> "$errlog" &
+fi
+cpid=$!
+R_claude_pid=$cpid; cw_run_save
+killed=0
+trap 'killed=1; kill -TERM "$cpid" 2>/dev/null' TERM INT HUP
+wait "$cpid"; code=$?
+while cw_pid_alive "$cpid"; do wait "$cpid"; code=$?; done
+trap - TERM INT HUP
+tail -c +$((R_stderr_offset + 1)) "$errlog" >&2 2>/dev/null
+cw_run_complete "$code" "$killed"
+if [ "$O_failed" = 1 ]; then
+    echo "claude-worker: run $R_id failed ($O_reason): $O_detail" >&2
+    echo "claude-worker: what it did so far: --recover $R_id; continue it with its whole context: --resume-run $R_id" >&2
+    [ "$code" = 0 ] && code=1
+fi
+exit "$code"

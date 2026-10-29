@@ -19,7 +19,7 @@ $begin = '<!-- claude-api-workers:begin -->'
 $end = '<!-- claude-api-workers:end -->'
 $repoUrl = 'https://github.com/camilbenameur/claude-api-workers'
 $utf8 = New-Object Text.UTF8Encoding $false
-$scripts = 'claude-worker.ps1', 'set-worker-key.ps1', 'find-api-keys.ps1', 'claude-worker-lib.ps1'
+$scripts = 'claude-worker.ps1', 'set-worker-key.ps1', 'find-api-keys.ps1', 'claude-worker-lib.ps1', 'claude-worker-runs.ps1'
 $extras = 'install.ps1', 'rules\rule.md', 'rules\mode-always.md', 'rules\mode-on-request.md'
 
 # A begin marker without its end (or the reverse) means a hand-edited file: refuse to guess
@@ -86,10 +86,15 @@ $values = [ordered]@{
     '{{DATE}}'           = (Get-Date -Format 'yyyy-MM-dd')
     '{{REPO_URL}}'       = $repoUrl
     '{{SHELL_TOOL}}'     = 'PowerShell (or Bash)'
-    '{{RUN_EXAMPLE}}'    = "$worker -PromptFile `"<brief.md>`" -Model sonnet -Cwd `"<project dir>`" -OutFile `"<scratchpad>\out-<name>.json`" --permission-mode acceptEdits --output-format json"
+    '{{RUN_EXAMPLE}}'    = "$worker -PromptFile `"<brief.md>`" -Name <name> -Model sonnet -Cwd `"<project dir>`" -OutFile `"<scratchpad>\out-<name>.json`" --permission-mode acceptEdits --output-format json"
     '{{PLATFORM_NOTES}}' = $notes
     '{{SETKEY_CMD}}'     = $setKey
     '{{STATUS_CMD}}'     = "$setKey -Status"
+    '{{RUNS_CMD}}'       = "$worker -Runs"
+    '{{RECOVER_CMD}}'    = "$worker -Recover"
+    '{{RESUME_CMD}}'     = "$worker -ResumeRun"
+    '{{PROMPT_OPT}}'     = '`-Prompt "..."` or `-PromptFile <file>`'
+    '{{FORCE_OPT}}'      = '-Force'
 }
 foreach ($k in $values.Keys) { $rule = $rule.Replace($k, $values[$k]) }
 $block = "$begin`n$($rule.Trim())`n$end"
