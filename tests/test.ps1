@@ -113,6 +113,8 @@ public static class Stub {
     Check '-OutFile writes UTF-8 with accents'     { [IO.File]::ReadAllText("$tmp\out.txt", $utf8).Contains("STDIN=caf$([char]0xE9)") }
     $st = Invoke-Child "& '$bin\claude-worker.ps1' -SelfTest"
     Check '-SelfTest passes'                       { $st.Code -eq 0 -and $st.Out.Contains('apiKeySource=ANTHROPIC_API_KEY') }
+    $fw = Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x -Model opus -Fast"
+    Check '-Fast sends the fast mode settings'     { $fw.Out.Contains('--model | opus') -and $fw.Out.Contains('| --settings |') -and -not (Get-ChildItem ([IO.Path]::GetTempPath()) -Filter 'claude-worker-fast-*.json') }
     Check 'refuses to run inside a worker (3)'     { (Invoke-Child "`$env:CLAUDE_WORKER = '1'; & '$bin\claude-worker.ps1' -Prompt x").Code -eq 3 }
     Check 'missing cwd exits 2'                    { (Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x -Cwd '$tmp\nope'").Code -eq 2 }
     Check 'quote in cwd exits 2'                   { (Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x -Cwd 'C:\x`" --model y'").Code -eq 2 }

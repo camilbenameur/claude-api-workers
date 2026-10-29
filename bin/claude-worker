@@ -5,6 +5,8 @@
 #   claude-worker --prompt-file brief.md [--model sonnet] [--cwd dir] [--out-file out.json] [claude options...]
 #   claude-worker --prompt "..."         [...]
 #   claude-worker --self-test            (cheap Haiku call: checks the worker really runs on the key)
+#   add --fast to ask for fast mode (Opus). It is used when the key's organization has it,
+#   and the worker runs at standard speed otherwise. --self-test --model opus --fast shows which.
 #
 # The worker has its own Task and Workflow tools: a workflow started inside it bills every
 # agent to the key. Any other option (--output-format json, --permission-mode ...) goes to claude.
@@ -21,7 +23,7 @@ fail() { _c=$1; shift; printf 'claude-worker: %s\n' "$*" >&2; exit "$_c"; }
 # Recursion guard: the worker's own agents read the same CLAUDE.md rule
 [ "${CLAUDE_WORKER:-}" = 1 ] && fail 3 "already inside an API worker: use your Task or Workflow tools directly"
 
-prompt='' prompt_file='' model='' cwd=$PWD out_file='' self_test=0
+prompt='' prompt_file='' model='' cwd=$PWD out_file='' self_test=0 fast=0
 extra=()
 while [ $# -gt 0 ]; do
     case $1 in
@@ -36,7 +38,8 @@ while [ $# -gt 0 ]; do
             esac
             shift 2 ;;
         --self-test) self_test=1; shift ;;
-        -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --fast) fast=1; shift ;;
+        -h | --help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) extra+=("$1"); shift ;;
     esac
 done
@@ -72,6 +75,15 @@ unset key
 guard='You are an API worker started by another Claude Code session: you are already billed to the API key. Never call claude-worker; to parallelize, use your Task or Workflow tools directly.'
 base=(-p --model "$model" --append-system-prompt "$guard")
 
+# claude -p only uses fast mode when the --settings file opts in. The Anthropic API still
+# decides per organization: without access, the worker simply runs at standard speed.
+if [ "$fast" = 1 ]; then
+    fast_file=$(mktemp) || fail 2 "cannot create a temporary file"
+    trap 'rm -f "$fast_file"' EXIT
+    printf '{"fastMode": true}' > "$fast_file"
+    base+=(--settings "$fast_file")
+fi
+
 cd "$cwd" || fail 2 "cannot enter $cwd"
 if [ "$self_test" = 1 ]; then
     out=$(printf '%s' "$prompt" | "$claude_bin" "${base[@]}" --output-format stream-json --verbose --max-turns 1 2>/dev/null)
@@ -79,7 +91,10 @@ if [ "$self_test" = 1 ]; then
     last=$(printf '%s\n' "$out" | grep '"type":"result"' | tail -n 1)
     result=$(printf '%s\n' "$last" | grep -o '"result":"[^"]*"' | head -n 1 | cut -d'"' -f4)
     cost=$(printf '%s\n' "$last" | grep -o '"total_cost_usd":[0-9.eE+-]*' | head -n 1 | cut -d: -f2)
-    echo "apiKeySource=${source:-?} result=${result:-?} cost_usd=${cost:-?}"
+    fast_state=$(printf '%s\n' "$out" | grep -o '"fast_mode_state":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    fast_why=$(printf '%s\n' "$out" | grep -o '"fast_mode_disabled_reason":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    speed=$(printf '%s\n' "$last" | grep -o '"speed":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+    echo "apiKeySource=${source:-?} result=${result:-?} cost_usd=${cost:-?} model=$model fast_mode=${fast_state:-?}${fast_why:+ ($fast_why)} speed=${speed:-?}"
     [ "$source" = ANTHROPIC_API_KEY ] && case $result in *"worker OK"*) exit 0 ;; esac
     exit 1
 fi

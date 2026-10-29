@@ -71,6 +71,7 @@ The installed rule tells the agent to write a self-contained brief and launch a 
 ```
 
 - **Workflows:** if the brief says "use a workflow", the worker runs one and waits for it to finish. All of its agents are billed to the key.
+- **Fast mode:** `--fast` (`-Fast` on Windows) sends Claude Code's opt-in (`{"fastMode": true}` through `--settings`). Whether fast mode is actually available is decided by the API for your organization. Without access, the worker runs at standard speed. To see which applies to you, run `claude-worker --self-test --model opus --fast`: it prints `fast_mode=on`, or `off` with the reason.
 - **Result:** `out.json` holds the final report in `result`, plus `total_cost_usd`.
 - **Other options:** any option the wrapper doesn't know is passed to `claude` as is.
 

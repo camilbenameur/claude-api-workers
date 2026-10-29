@@ -94,6 +94,7 @@ printf 'from a file' > "$tmp/brief.md"
 "$bin/claude-worker" --prompt-file "$tmp/brief.md" --out-file "$tmp/out.txt" > /dev/null
 check "--prompt-file and --out-file"           'grep -q "STDIN=from a file" "$tmp/out.txt"'
 check "--self-test passes"                     '"$bin/claude-worker" --self-test > /dev/null'
+check "--fast sends the fast mode settings"    '[[ $("$bin/claude-worker" --prompt x --model opus --fast) == *"--model opus"*"--settings "* ]]'
 CLAUDE_WORKER=1 "$bin/claude-worker" --prompt x > /dev/null 2>&1
 check "refuses to run inside a worker (3)"     '[ $? = 3 ]'
 "$bin/claude-worker" --prompt x --cwd "$tmp/nope" > /dev/null 2>&1

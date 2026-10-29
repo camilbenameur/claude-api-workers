@@ -18,7 +18,7 @@ If you are yourself a worker or one of its agents (your system prompt says so, o
 {{PLATFORM_NOTES}}
 3. Check the worker's work (files, diff, result) before you say it is done. If the process failed or was killed, read `result-<name>.md` and the touched files before relaunching. Never run two workers on the same files at the same time.
 
-**Models:** the model you pass is the worker's, and its workflow agents inherit it unless your brief says otherwise. Use sonnet by default and haiku for mechanical work, unless the user has set other model preferences.
+**Models:** the model you pass is the worker's, and its workflow agents inherit it unless your brief says otherwise. Use sonnet by default and haiku for mechanical work, unless the user has set other model preferences. Add `-Fast` (Windows) or `--fast` (macOS/Linux) to ask for fast mode with opus. It is used when the key's organization has access, and otherwise the worker runs at standard speed without failing.
 
 **Failures:** exit code 2 means the key is missing, invalid or unreadable; 3 means the script was called from inside a worker; 127 means `claude` is not on PATH. On exit code 2, or on a 401, 403 or credit error in the output, tell the user to run `{{SETKEY_CMD}}` in their terminal (hidden prompt), then wait. Do not fall back to your own sub-agents without the user's OK.
 

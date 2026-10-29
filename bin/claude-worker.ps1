@@ -5,6 +5,8 @@
 #   claude-worker.ps1 -PromptFile brief.md [-Model sonnet] [-Cwd dir] [-OutFile out.json] [claude options...]
 #   claude-worker.ps1 -Prompt "..."        [...]
 #   claude-worker.ps1 -SelfTest            (cheap Haiku call: checks the worker really runs on the key)
+#   add -Fast to ask for fast mode (Opus). It is used when the key's organization has it,
+#   and the worker runs at standard speed otherwise. -SelfTest -Model opus -Fast shows which.
 #
 # The worker has its own Task and Workflow tools: a workflow started inside it bills every
 # agent to the key. Unknown options (--output-format json, --permission-mode ...) go to claude.
@@ -17,7 +19,7 @@
 
 function Fail([int]$Code, [string]$Message) { [Console]::Error.WriteLine("claude-worker: $Message"); exit $Code }
 
-$Prompt = ''; $PromptFile = ''; $Model = ''; $Cwd = (Get-Location).Path; $OutFile = ''; $SelfTest = $false
+$Prompt = ''; $PromptFile = ''; $Model = ''; $Cwd = (Get-Location).Path; $OutFile = ''; $SelfTest = $false; $Fast = $false
 $ClaudeArgs = @()
 for ($i = 0; $i -lt $args.Count; $i++) {
     $a = [string]$args[$i]
@@ -27,6 +29,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         Set-Variable -Name $Matches[1] -Value ([string]$args[$i])
     }
     elseif ($a -eq '-SelfTest') { $SelfTest = $true }
+    elseif ($a -eq '-Fast') { $Fast = $true }
     else { $ClaudeArgs += $a }
 }
 
@@ -71,6 +74,15 @@ $utf8 = New-Object Text.UTF8Encoding $false
 $guard = 'You are an API worker started by another Claude Code session: you are already billed to the API key. Never call claude-worker; to parallelize, use your Task or Workflow tools directly.'
 $base = @('-p', '--model', $Model, '--append-system-prompt', $guard)
 $workDir = (Resolve-Path -LiteralPath $Cwd).ProviderPath
+
+# claude -p only uses fast mode when the --settings file opts in. The Anthropic API still
+# decides per organization: without access, the worker simply runs at standard speed.
+$fastFile = $null
+if ($Fast) {
+    $fastFile = [IO.Path]::Combine([IO.Path]::GetTempPath(), "claude-worker-fast-$PID.json")
+    [IO.File]::WriteAllText($fastFile, '{"fastMode": true}', $utf8)
+    $base += @('--settings', $fastFile)
+}
 
 # One argument, quoted by the MSVC command-line rules that claude.exe (Node) parses
 function ConvertTo-NativeArgument([string]$Value) {
@@ -128,14 +140,18 @@ try {
     if ($SelfTest) {
         $tmpOut = [IO.Path]::GetTempFileName()
         $null = Invoke-Claude ($base + @('--output-format', 'stream-json', '--verbose', '--max-turns', '1')) $tmpOut
-        $source = '?'; $result = '?'; $cost = '?'
+        $source = '?'; $result = '?'; $cost = '?'; $fastState = '?'
         foreach ($line in [IO.File]::ReadAllLines($tmpOut, $utf8)) {
             try { $j = $line | ConvertFrom-Json } catch { continue }
-            if ($j.type -eq 'system' -and $j.subtype -eq 'init') { $source = $j.apiKeySource }
-            if ($j.type -eq 'result') { $result = $j.result; $cost = $j.total_cost_usd }
+            if ($j.type -eq 'system' -and $j.subtype -eq 'init') {
+                $source = $j.apiKeySource
+                $fastState = "$($j.fast_mode_state)"
+                if ($j.fast_mode_disabled_reason) { $fastState += " ($($j.fast_mode_disabled_reason))" }
+            }
+            if ($j.type -eq 'result') { $result = $j.result; $cost = $j.total_cost_usd; $speed = $j.usage.speed }
         }
         Remove-Item -LiteralPath $tmpOut -ErrorAction SilentlyContinue
-        Write-Output "apiKeySource=$source result=$result cost_usd=$cost"
+        Write-Output "apiKeySource=$source result=$result cost_usd=$cost model=$Model fast_mode=$fastState speed=$speed"
         $code = 1
         if ($source -eq 'ANTHROPIC_API_KEY' -and "$result" -match 'worker OK') { $code = 0 }
     }
@@ -145,5 +161,6 @@ try {
 }
 finally {
     Remove-Item Env:ANTHROPIC_API_KEY -ErrorAction SilentlyContinue
+    if ($fastFile) { Remove-Item -LiteralPath $fastFile -ErrorAction SilentlyContinue }
 }
 exit $code
