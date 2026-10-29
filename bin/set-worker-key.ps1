@@ -52,6 +52,10 @@ if ($key -notmatch '^sk-ant-api\d{2}-' -and -not $Force) {
     Write-Error 'This is not an Anthropic Console API key (sk-ant-api...). Use -Force to store it anyway.'
     exit 2
 }
+if ($key -match '[^A-Za-z0-9_-]' -and -not $Force) {
+    Write-Error 'The key contains unexpected characters (a quote? a backslash?). Use -Force to store it anyway.'
+    exit 2
+}
 if (-not $NoCheck) {
     $state = Test-AnthropicKey $key
     if ($state -eq 'invalid' -and -not $Force) { Write-Error 'The Anthropic API rejects this key (401/403): revoked or expired? Nothing stored.'; exit 2 }

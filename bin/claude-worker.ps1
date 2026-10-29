@@ -59,8 +59,7 @@ if (-not $key.StartsWith('sk-ant-')) { Fail 2 'stored key unreadable or invalid:
 
 # Drop everything the Claude app passes to its child processes (account, session, API URL),
 # otherwise the worker would authenticate as the subscription instead of the key.
-@(Get-ChildItem Env: |
-    Where-Object { $_.Name -match '^(CLAUDE_CODE_|CLAUDE_AGENT_SDK_|ANTHROPIC_)' -or $_.Name -in 'CLAUDECODE', 'CLAUDE_PID' }) |
+@(Get-ChildItem Env: | Where-Object { Test-ShouldDropVariable $_.Name }) |
     ForEach-Object { Remove-Item "Env:$($_.Name)" -ErrorAction SilentlyContinue }
 
 $env:ANTHROPIC_API_KEY = $key
@@ -93,16 +92,22 @@ function Invoke-Claude([string[]]$ArgList, [string]$OutPath) {
         $psi.RedirectStandardInput = $true
         $psi.RedirectStandardOutput = [bool]$OutPath
         $p = [Diagnostics.Process]::Start($psi)
-        $copy = $null
-        if ($OutPath) {
-            $file = [IO.File]::Create($OutPath)
-            $copy = $p.StandardOutput.BaseStream.CopyToAsync($file)
+        $copy = $null; $file = $null
+        try {
+            if ($OutPath) {
+                $file = [IO.File]::Create($OutPath)
+                $copy = $p.StandardOutput.BaseStream.CopyToAsync($file)
+            }
+            try {
+                $bytes = $utf8.GetBytes($Prompt)
+                $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+                $p.StandardInput.Close()
+            }
+            catch [IO.IOException] { }   # claude exited before reading stdin: its exit code still matters
+            $p.WaitForExit()
+            if ($copy) { $copy.Wait() }
         }
-        $bytes = $utf8.GetBytes($Prompt)
-        $p.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-        $p.StandardInput.Close()
-        $p.WaitForExit()
-        if ($copy) { $copy.Wait(); $file.Close() }
+        finally { if ($file) { $file.Close() } }
         return $p.ExitCode
     }
     $global:OutputEncoding = $utf8

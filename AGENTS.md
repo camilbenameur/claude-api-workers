@@ -17,8 +17,8 @@ What gets installed: scripts in `~/.claude/claude-worker/`, plus a marked block 
 
 In one short message, tell the user what you are about to do:
 1. install the scripts to `~/.claude/claude-worker/`;
-2. add a marked block to `~/.claude/CLAUDE.md`, with a backup kept as `CLAUDE.md.bak-claude-api-workers`;
-3. scan the machine for Anthropic API keys that already exist, showing only masked fingerprints, never full keys.
+2. add a marked block to `~/.claude/CLAUDE.md`, with the original file kept as `CLAUDE.md.bak-claude-api-workers`. From then on, every new Claude Code session routes its sub-agents and workflows to workers billed to the key;
+3. scan environment variables, shell profiles, Claude Code configs and `.env` files under their home folder for Anthropic API keys. Only masked fingerprints are shown, never full keys. Each key found is checked with a read-only call to api.anthropic.com, the only place it is sent. If the user doesn't want that check, drop `-Check`/`--check` in step 3.
 
 Ask a single question: which mode, and go or not. The two modes:
 - **always** (default): every sub-agent and workflow goes through a worker billed to the key.
@@ -28,14 +28,15 @@ Use your question tool if you have one (for example AskUserQuestion), with "alwa
 
 ## 2. Install
 
-Windows:
+Use the mode the user chose in step 1 (`always` if they didn't say). Windows:
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -File "<clone>\install.ps1" -Mode always
+powershell -NoProfile -ExecutionPolicy Bypass -File "<clone>\install.ps1" -Mode <always|on-request>
 ```
 macOS and Linux:
 ```
-bash "<clone>/install.sh" --mode always
+bash "<clone>/install.sh" --mode <always|on-request>
 ```
+If the installer stops because of "unbalanced claude-api-workers markers", show the user the lines involved in `~/.claude/CLAUDE.md` and let them decide. Don't fix the file on your own.
 The installer is idempotent: running it again updates the scripts and replaces the block. If it warns that CLAUDE.md "already mentions claude-worker outside the block", show the user the duplicate and ask whether to remove the old one. Don't delete it on your own.
 
 Check that the `claude` CLI is on PATH (`claude --version`), because workers need it. If it is missing, tell the user and give them the official install command from https://docs.claude.com/en/docs/claude-code/setup. Don't install software without their OK.
@@ -59,17 +60,22 @@ Never store the key yourself. Saving a credential is the user's action: give the
 - **At least one key is `valid`:** show the valid ones as a short list (masked form, where it was found). Recommend one, preferring a key from a dedicated config over one from a project's `.env`. Then give the exact command in its own fenced code block tagged `bash`, so the Claude desktop app shows a Run button:
   - Windows: `powershell -NoProfile -ExecutionPolicy Bypass -File "<home>\.claude\claude-worker\bin\set-worker-key.ps1" -From <fingerprint>`
   - macOS and Linux: `~/.claude/claude-worker/bin/set-worker-key --from <fingerprint>`
-- **Always also give the manual option**, the same command without `-From`/`--from`. It opens a hidden prompt where the user pastes a key from https://console.anthropic.com/settings/keys.
+- **Always also give the manual option**, the same command without `-From`/`--from`. It opens a hidden prompt where the user pastes a key from https://console.anthropic.com/settings/keys. That prompt needs an interactive terminal, so tell the user to run this command in their own terminal (or the app's Terminal panel), and don't present it as a one-click Run block.
 - **No valid key:** give only the manual option.
 
 Write the paths in full, with the user's real home folder: a Run button doesn't always expand `~`. Then wait until the user says it's done.
 
 ## 5. Verify
 
-Run these:
+Run these. Windows:
 ```
-<bin>/set-worker-key --status        (Windows: set-worker-key.ps1 -Status)
-<bin>/claude-worker --self-test      (Windows: claude-worker.ps1 -SelfTest)
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\<user>\.claude\claude-worker\bin\set-worker-key.ps1" -Status
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\<user>\.claude\claude-worker\bin\claude-worker.ps1" -SelfTest
+```
+macOS and Linux:
+```
+~/.claude/claude-worker/bin/set-worker-key --status
+~/.claude/claude-worker/bin/claude-worker --self-test
 ```
 `--self-test` makes a Haiku call that costs about $0.001. It passes when it prints `apiKeySource=ANTHROPIC_API_KEY` and `result=worker OK`, with exit code 0. Here is what its other exit codes mean:
 - `2`: no key, or an unreadable key. Go back to step 4.
@@ -83,6 +89,7 @@ Tell the user, in a few lines:
 - what was installed, where, and in which mode;
 - that sessions started from now on follow the rule. Sessions already running read `~/.claude/CLAUDE.md` at startup, so they have to be told: if you can message the user's other sessions, offer to do it;
 - that only the delegated work is billed to the key. The session itself stays on whatever it already runs on, because the Claude desktop app always uses the claude.ai login;
-- how to uninstall: `install.ps1 -Uninstall` / `install.sh --uninstall`. The stored key is removed separately with `set-worker-key -Remove` / `--remove`.
+- how to uninstall: the installer copied itself to `~/.claude/claude-worker/`, so the uninstall command the installer printed keeps working after the clone is deleted. The stored key is removed separately with `set-worker-key -Remove` / `--remove`;
+- that workers should only be pointed at folders the user trusts. A worker loads that folder's Claude Code settings and runs with the key in its environment.
 
 Delete the temporary clone when you're done.

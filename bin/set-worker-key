@@ -9,8 +9,9 @@
 #   set-worker-key --remove            delete the stored key
 # Add --no-check to skip the online check, --force to store a key the API rejects.
 set -u
-here=$(cd "$(dirname "$0")" && pwd)
-. "$here/claude-worker-lib.sh"
+s=$0; while [ -L "$s" ]; do d=$(cd "$(dirname "$s")" && pwd); s=$(readlink "$s"); case $s in /*) ;; *) s=$d/$s ;; esac; done
+here=$(cd "$(dirname "$s")" && pwd)
+. "$here/claude-worker-lib.sh" || { echo "set-worker-key: cannot load claude-worker-lib.sh from $here" >&2; exit 2; }
 
 fail() { _c=$1; shift; printf 'set-worker-key: %s\n' "$*" >&2; exit "$_c"; }
 
@@ -62,6 +63,9 @@ key=$(printf '%s' "$key" | tr -d '[:space:]')
 case $key in
     sk-ant-api[0-9][0-9]-*) ;;
     *) [ "$force" = 1 ] || fail 2 "this is not an Anthropic Console API key (sk-ant-api...); use --force to store it anyway" ;;
+esac
+case $key in
+    *[!A-Za-z0-9_-]*) [ "$force" = 1 ] || fail 2 "the key contains unexpected characters (a quote? a backslash?); use --force to store it anyway" ;;
 esac
 if [ "$nocheck" = 0 ]; then
     state=$(cw_check_key "$key")

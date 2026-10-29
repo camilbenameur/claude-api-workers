@@ -67,6 +67,7 @@ esac
 echo "KEYFP=$(printf '%s' "${ANTHROPIC_API_KEY:-}" | (sha256sum 2>/dev/null || shasum -a 256) | cut -c1-12)"
 echo "LEAK=${CLAUDE_CODE_FAKE:-none}/${ANTHROPIC_BASE_URL:-none}/${CLAUDECODE:-none}"
 echo "WORKER=${CLAUDE_WORKER:-}"
+echo "KEEP=${CLAUDE_CODE_GIT_BASH_PATH:-none}/${CLAUDE_CODE_KEEPME:-none}"
 echo "PWD=$PWD"
 echo "ARGS=$*"
 echo "STDIN=$stdin"
@@ -74,6 +75,7 @@ STUB
 chmod +x "$tmp/stub/claude"
 export PATH="$tmp/stub:$PATH"
 export CLAUDE_CODE_FAKE=leak ANTHROPIC_BASE_URL=http://example.invalid CLAUDECODE=1
+export CLAUDE_CODE_GIT_BASH_PATH=/opt/git/bash CLAUDE_CODE_KEEPME=yes CLAUDE_WORKER_KEEP_ENV=CLAUDE_CODE_KEEPME
 mkdir -p "$tmp/work dir"
 out=$("$bin/claude-worker" --prompt "héllo \"quoted\"" --cwd "$tmp/work dir" --output-format json --json-schema '{"a":"b c"}')
 check "worker gets the stored key"             '[[ $out == *"KEYFP=$fp1"* ]]'
@@ -83,6 +85,11 @@ check "runs in --cwd (with a space)"           '[[ $out == *"PWD=$tmp/work dir"*
 check "prompt arrives on stdin intact"         '[[ $out == *"STDIN=héllo \"quoted\""* ]]'
 check "unknown options reach claude"           '[[ $out == *"--output-format json --json-schema {\"a\":\"b c\"}"* ]]'
 check "parent environment is untouched"        '[ "$CLAUDE_CODE_FAKE" = leak ]'
+check "keeps GIT_BASH_PATH and KEEP_ENV names" '[[ $out == *"KEEP=/opt/git/bash/yes"* ]]'
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) ;; *)
+    ln -s "$bin/claude-worker" "$tmp/cw-link"
+    check "works when called through a symlink" '[[ $("$tmp/cw-link" --prompt x) == *"KEYFP=$fp1"* ]]' ;;
+esac
 printf 'from a file' > "$tmp/brief.md"
 "$bin/claude-worker" --prompt-file "$tmp/brief.md" --out-file "$tmp/out.txt" > /dev/null
 check "--prompt-file and --out-file"           'grep -q "STDIN=from a file" "$tmp/out.txt"'
@@ -96,7 +103,8 @@ check "CLAUDE_WORKER_KEY_HELPER wins"          'grep -q "KEYFP=$fp2" "$tmp/h.txt
 "$bin/set-worker-key" --remove > /dev/null
 "$bin/claude-worker" --prompt x > /dev/null 2>&1
 check "no stored key exits 2"                  '[ $? = 2 ]'
-unset CLAUDE_CODE_FAKE ANTHROPIC_BASE_URL CLAUDECODE
+unset CLAUDE_CODE_FAKE ANTHROPIC_BASE_URL CLAUDECODE CLAUDE_CODE_GIT_BASH_PATH CLAUDE_CODE_KEEPME CLAUDE_WORKER_KEEP_ENV
+check "find-api-keys --help has no code line"  '! "$bin/find-api-keys" --help | grep -q "set -u"'
 
 # --- install.sh (not on Windows shells: install.ps1 covers those)
 case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) echo "skip - install.sh tests (Windows shell)" ;; *)
@@ -109,12 +117,32 @@ case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) echo "skip - install.sh tests (W
     check "mode on-request was applied"        '[[ $md == *"asks for \"API workers\""* ]]'
     check "no placeholder left"                '[[ $md != *"{{"* ]]'
     check "scripts are executable"             '[ -x "$HOME/.claude/claude-worker/bin/claude-worker" ]'
-    bash "$repo/install.sh" --uninstall > /dev/null
+    check "backup holds the original file"     'cmp -s "$HOME/.claude.md.seed" "$HOME/.claude/CLAUDE.md.bak-claude-api-workers"'
+    check "installer is copied for uninstall"  '[ -x "$HOME/.claude/claude-worker/install.sh" ]'
+    bash "$HOME/.claude/claude-worker/install.sh" > /dev/null
+    check "reinstall from the installed copy"  '[ "$(grep -c "claude-api-workers:begin" "$HOME/.claude/CLAUDE.md")" = 1 ]'
+    bash "$HOME/.claude/claude-worker/install.sh" --uninstall > /dev/null
     check "uninstall removes the block"        '! grep -q "claude-api-workers" "$HOME/.claude/CLAUDE.md"'
     check "uninstall keeps the user's content" 'grep -q "Keep this." "$HOME/.claude/CLAUDE.md"'
     check "uninstall removes the scripts"      '[ ! -e "$HOME/.claude/claude-worker" ]'
+
+    mkdir -p "$tmp/tools" && echo mine > "$tmp/tools/keep.txt"
+    bash "$repo/install.sh" --prefix "$tmp/tools" > /dev/null && bash "$repo/install.sh" --uninstall --prefix "$tmp/tools" > /dev/null
+    check "uninstall spares foreign files"     '[ -f "$tmp/tools/keep.txt" ] && [ ! -e "$tmp/tools/bin" ]'
+
+    printf '# Mine\n<!-- claude-api-workers:begin -->\nhalf block\n\nMy later rules.\n' > "$HOME/.claude/CLAUDE.md"
+    bash "$repo/install.sh" > /dev/null 2>&1
+    check "unbalanced markers are refused"     '[ $? = 2 ] && grep -q "My later rules." "$HOME/.claude/CLAUDE.md"'
+
+    printf '# Dotfiles\n' > "$tmp/dotfiles-claude.md"
+    rm -f "$HOME/.claude/CLAUDE.md" && ln -s "$tmp/dotfiles-claude.md" "$HOME/.claude/CLAUDE.md"
+    bash "$repo/install.sh" > /dev/null
+    check "a symlinked CLAUDE.md stays a link" '[ -L "$HOME/.claude/CLAUDE.md" ] && grep -q "claude-api-workers:begin" "$tmp/dotfiles-claude.md"'
     ;;
 esac
+
+"$bin/set-worker-key" --no-check < /dev/null > /dev/null 2>&1
+check "hidden prompt refuses to run without a terminal" '[ $? = 2 ]'
 
 echo "$pass passed, $failed failed"
 [ "$failed" = 0 ]

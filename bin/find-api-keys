@@ -11,8 +11,9 @@
 # the home folder, skipping dependency/cache folders. Symlinks are not followed.
 # --secret-for FINGERPRINT is internal (used by set-worker-key): prints that one key.
 set -u
-here=$(cd "$(dirname "$0")" && pwd)
-. "$here/claude-worker-lib.sh"
+s=$0; while [ -L "$s" ]; do d=$(cd "$(dirname "$s")" && pwd); s=$(readlink "$s"); case $s in /*) ;; *) s=$d/$s ;; esac; done
+here=$(cd "$(dirname "$s")" && pwd)
+. "$here/claude-worker-lib.sh" || { echo "find-api-keys: cannot load claude-worker-lib.sh from $here" >&2; exit 2; }
 
 json=0 check=0 max_depth=6 secret_for=''
 roots=()
@@ -23,11 +24,17 @@ while [ $# -gt 0 ]; do
         --root) [ $# -ge 2 ] || { echo "--root needs a value" >&2; exit 2; }; roots+=("$2"); shift 2 ;;
         --max-depth) [ $# -ge 2 ] || { echo "--max-depth needs a value" >&2; exit 2; }; max_depth=$2; shift 2 ;;
         --secret-for) [ $# -ge 2 ] || exit 2; secret_for=$(printf '%s' "$2" | tr 'A-F' 'a-f'); shift 2 ;;
-        -h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
-[ ${#roots[@]} -gt 0 ] || roots=("$HOME")
+# On macOS, walking ~/Documents, ~/Desktop or ~/Downloads triggers privacy prompts and can
+# download iCloud placeholders: skip them unless a --root asks for them explicitly.
+skip_mac=0
+if [ ${#roots[@]} -eq 0 ]; then
+    roots=("$HOME")
+    [ "$(uname -s)" = Darwin ] && skip_mac=1
+fi
 
 # hits: "fingerprint<TAB>place"   vals: "fingerprint<TAB>key" (mode 600, deleted on exit)
 umask 077
@@ -42,6 +49,7 @@ add_hit() {
 
 scan_file() {
     [ -f "$1" ] && [ -r "$1" ] || return 0
+    [ "$(wc -c < "$1" 2>/dev/null || echo 0)" -le 52428800 ] || return 0
     grep -noE "$CW_KEY_PATTERN" "$1" 2>/dev/null | while IFS= read -r line; do
         add_hit "${line#*:}" "file:$1:${line%%:*}"
     done
@@ -66,15 +74,18 @@ for f in "$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json" "$HOM
     scan_file "$f"
 done
 
-# 3. .env-style files under the roots
+# 3. .env-style files under the roots (one filesystem, 60 s at most when `timeout` exists)
+limit=''; command -v timeout >/dev/null 2>&1 && limit='timeout 60'
 for r in "${roots[@]}"; do
     [ -d "$r" ] || continue
-    find "$r" -maxdepth "$max_depth" \
+    mac_prune=()
+    [ "$skip_mac" = 1 ] && mac_prune=(-o -path "$HOME/Documents" -o -path "$HOME/Desktop" -o -path "$HOME/Downloads")
+    $limit find "$r" -xdev -maxdepth "$max_depth" \
         \( -type d \( -name node_modules -o -name .git -o -name .hg -o -name .svn -o -name .venv \
         -o -name venv -o -name __pycache__ -o -name .cache -o -name .npm -o -name .yarn \
         -o -name .pnpm-store -o -name .cargo -o -name .rustup -o -name .gradle -o -name .m2 \
         -o -name .nuget -o -name Library -o -name .Trash -o -name site-packages -o -name .next \
-        -o -name .nuxt -o -name Pods -o -name DerivedData -o -name AppData \) -prune \) \
+        -o -name .nuxt -o -name Pods -o -name DerivedData -o -name AppData ${mac_prune[@]+"${mac_prune[@]}"} \) -prune \) \
         -o \( -type f \( -name '.env' -o -name '.env.*' -o -name '*.env' -o -name '.envrc' \) \
         -size -1024k -print \) 2>/dev/null
 done | while IFS= read -r f; do scan_file "$f"; done
@@ -126,6 +137,8 @@ EOF
         printf '%s\n' "$places" | sed 's/^/      /'
     fi
 done
+[ "$json" = 0 ] && [ "$skip_mac" = 1 ] &&
+    echo "Note: ~/Documents, ~/Desktop and ~/Downloads were skipped (macOS privacy prompts); add --root to scan one."
 if [ "$json" = 1 ]; then
     printf '\n  ],\n  "stored_key": %s,\n  "roots": [' "$([ -n "$stored_fp" ] && json_str "$stored_fp" || echo null)"
     sep=''; for r in "${roots[@]}"; do printf '%s%s' "$sep" "$(json_str "$r")"; sep=', '; done

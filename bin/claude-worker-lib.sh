@@ -42,7 +42,8 @@ cw_check_key() {
     command -v curl >/dev/null 2>&1 || { echo unreachable; return 0; }
     _base=${CLAUDE_WORKER_BASE_URL:-https://api.anthropic.com}
     _base=${_base%/}
-    _code=$(printf 'header = "x-api-key: %s"\n' "$1" |
+    _k=${1//\\/\\\\}; _k=${_k//\"/\\\"}
+    _code=$(printf 'header = "x-api-key: %s"\n' "$_k" |
         curl -s -o /dev/null -w '%{http_code}' --max-time 20 -K - \
             -H 'anthropic-version: 2023-06-01' "$_base/v1/models?limit=1" 2>/dev/null)
     case $_code in
@@ -54,3 +55,12 @@ cw_check_key() {
 }
 
 CW_KEY_PATTERN='sk-ant-api[0-9][0-9]-[A-Za-z0-9_-]{20,}'
+
+# Variables starting with these prefixes are removed before a worker starts, except the ones
+# listed in CW_KEEP_ENV and in the user's CLAUDE_WORKER_KEEP_ENV (comma-separated names).
+CW_KEEP_ENV='CLAUDE_CODE_GIT_BASH_PATH'
+cw_should_drop() {
+    case $1 in CLAUDE_CODE_* | CLAUDE_AGENT_SDK_* | ANTHROPIC_* | CLAUDECODE | CLAUDE_PID) ;; *) return 1 ;; esac
+    case ",$CW_KEEP_ENV,${CLAUDE_WORKER_KEEP_ENV:-}," in *",$1,"*) return 1 ;; esac
+    return 0
+}

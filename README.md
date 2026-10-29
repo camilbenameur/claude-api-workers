@@ -26,7 +26,7 @@ and press Enter. The agent follows [AGENTS.md](AGENTS.md):
 4. It gives you **one command to run**, with a Run button in the desktop app, that stores the key you picked, or opens a hidden prompt where you paste one.
 5. It runs a self-test that costs about $0.001 and confirms the worker authenticates with the key.
 
-The agent never sees your key in clear. You are the one who stores it.
+The agent never handles your key: it only sees masked fingerprints, and you store the key yourself.
 
 ### Manual install
 
@@ -40,8 +40,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1     # Windows 
 ```
 Then store a key and test:
 ```bash
-~/.claude/claude-worker/bin/set-worker-key         # hidden prompt (Windows: set-worker-key.ps1)
+~/.claude/claude-worker/bin/set-worker-key            # hidden prompt
 ~/.claude/claude-worker/bin/claude-worker --self-test
+```
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\claude-worker\bin\set-worker-key.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\claude-worker\bin\claude-worker.ps1" -SelfTest
 ```
 
 ## What gets installed
@@ -74,12 +78,21 @@ Exit codes: claude's own code, or `2` for a key or input problem, `3` when calle
 
 ## Safety model
 
-- **The key stays out of the model's context.** It is never printed. It is decrypted only inside the worker process and passed to `claude` through the environment. The online check sends it through stdin or a request header, never as a command-line argument.
-- **Key detection is read-only and masked.** `find-api-keys` reads environment variables, known config files and `.env`-style files under your home folder, skipping `node_modules`, `.git`, caches and virtualenvs, and it doesn't follow symlinks. It prints a fingerprint (the first 12 hex characters of the SHA-256), the first 13 and last 4 characters, and where it found each key. Nothing leaves the machine except `--check`, which calls `GET /v1/models` on the Anthropic API.
+- **The scripts never print the key or put it on a command line.**
+  - It is decrypted only in the worker process and handed to `claude` through `ANTHROPIC_API_KEY`.
+  - The online check sends it through stdin or a request header.
+  - The variable is visible to what runs inside the worker (its shell commands, hooks and MCP servers). A worker allowed to run commands, and especially one in `bypassPermissions` mode, could therefore read it.
+  - Point workers only at folders you trust: a worker also loads that folder's `.claude/settings.json`.
+- **Key detection is read-only and masked.**
+  - `find-api-keys` reads environment variables, known config files, and `.env`-style files under your home folder. It skips `node_modules`, `.git`, caches and virtualenvs, stays on one filesystem, and doesn't follow symlinks.
+  - On macOS it skips `~/Documents`, `~/Desktop` and `~/Downloads` unless you pass them with `--root`, because walking them triggers privacy prompts.
+  - It prints a fingerprint (the first 12 hex characters of the SHA-256), the first 13 and last 4 characters, and where it found each key.
+  - Nothing leaves the machine except with `--check`, which calls `GET /v1/models` on the Anthropic API.
 - **Storing a key is always the user's action.** Agents only hand out the command.
 - **No silent fallback.**
   - A missing or unreadable key stops the worker with exit code 2. Otherwise `claude` would quietly fall back to your subscription login.
-  - The worker also drops the `CLAUDE_CODE_*` and `ANTHROPIC_*` variables the Claude app passes to child processes, which would otherwise take precedence over the key.
+  - The worker also drops the `CLAUDE_CODE_*` and `ANTHROPIC_*` variables the Claude app passes to child processes, which would otherwise take precedence over the key. Two exceptions are kept: `CLAUDE_CODE_GIT_BASH_PATH`, and any names you list in `CLAUDE_WORKER_KEEP_ENV` (comma-separated).
+  - To send workers through a gateway, set `CLAUDE_WORKER_BASE_URL`.
 - **No recursion.** Workers get `CLAUDE_WORKER=1` and an appended system prompt. The script refuses to run inside a worker, even when the worker's own agents read the same CLAUDE.md rule.
 - **No surprise permissions.** The rule tells the session to give the worker its own permission mode (`acceptEdits` unless the session already runs in `bypassPermissions`).
 
@@ -96,10 +109,16 @@ Exit codes: claude's own code, or `2` for a key or input problem, `3` when calle
 
 ## Uninstall
 
+The installer copies itself to `~/.claude/claude-worker/`, so you don't need the clone:
+
 ```bash
 ~/.claude/claude-worker/bin/set-worker-key --remove     # optional: delete the stored key first
-./install.sh --uninstall                                # Windows: install.ps1 -Uninstall
+bash ~/.claude/claude-worker/install.sh --uninstall
 ```
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$HOME\.claude\claude-worker\install.ps1" -Uninstall
+```
+Uninstalling removes only the files it installed and its own block in `CLAUDE.md`. The `CLAUDE.md` as it was before the first install is kept as `CLAUDE.md.bak-claude-api-workers`.
 
 ## Tests
 

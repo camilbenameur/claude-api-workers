@@ -60,3 +60,12 @@ function Test-AnthropicKey([string]$Key) {
 }
 
 $script:AnthropicKeyPattern = 'sk-ant-api\d{2}-[A-Za-z0-9_-]{20,}'
+
+# Variables with these prefixes are removed before a worker starts (they would make claude use
+# the parent session's login), except CLAUDE_CODE_GIT_BASH_PATH and the names listed in the
+# user's CLAUDE_WORKER_KEEP_ENV (comma-separated).
+function Test-ShouldDropVariable([string]$Name) {
+    if ($Name -notmatch '^(CLAUDE_CODE_|CLAUDE_AGENT_SDK_|ANTHROPIC_)' -and $Name -notin 'CLAUDECODE', 'CLAUDE_PID') { return $false }
+    $keep = @('CLAUDE_CODE_GIT_BASH_PATH') + @("$env:CLAUDE_WORKER_KEEP_ENV" -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    return ($keep -notcontains $Name)
+}

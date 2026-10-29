@@ -14,6 +14,7 @@ If you are yourself a worker or one of its agents (your system prompt says so, o
    `{{RUN_EXAMPLE}}`
    - The JSON's `result` field is the final report: the worker waits for its own workflow to finish. `total_cost_usd` is what it cost, and `is_error` flags a failure.
    - Permission mode: pass the mode your session runs in. Use `bypassPermissions` only if this session already runs in it; otherwise use `acceptEdits`, where the worker can read and edit files but cannot run shell commands that need approval.
+   - Only point a worker at folders the user trusts: it loads that folder's Claude Code settings and hooks, and runs with the key in its environment.
 {{PLATFORM_NOTES}}
 3. Check the worker's work (files, diff, result) before you say it is done. If the process failed or was killed, read `result-<name>.md` and the touched files before relaunching. Never run two workers on the same files at the same time.
 

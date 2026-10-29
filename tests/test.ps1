@@ -85,6 +85,7 @@ public static class Stub {
         o.WriteLine("KEYFP=" + sb.ToString().Substring(0, 12));
         o.WriteLine("LEAK=" + env("CLAUDE_CODE_FAKE") + "/" + env("ANTHROPIC_BASE_URL") + "/" + env("CLAUDECODE"));
         o.WriteLine("WORKER=" + env("CLAUDE_WORKER"));
+        o.WriteLine("KEEP=" + env("CLAUDE_CODE_GIT_BASH_PATH") + "/" + env("CLAUDE_CODE_KEEPME"));
         o.WriteLine("PWD=" + Environment.CurrentDirectory);
         o.WriteLine("ARGS=" + string.Join(" | ", a));
         o.WriteLine("STDIN=" + stdin.TrimEnd());
@@ -94,6 +95,7 @@ public static class Stub {
 '@
     $env:PATH = "$tmp\stub;$env:PATH"
     $env:CLAUDE_CODE_FAKE = 'leak'; $env:ANTHROPIC_BASE_URL = 'http://example.invalid'; $env:CLAUDECODE = '1'
+    $env:CLAUDE_CODE_GIT_BASH_PATH = 'C:\Git\bin\bash.exe'; $env:CLAUDE_CODE_KEEPME = 'yes'; $env:CLAUDE_WORKER_KEEP_ENV = 'CLAUDE_CODE_KEEPME'
     [IO.File]::WriteAllText("$tmp\brief.md", "h$([char]0xE9)llo `"quoted`" from a file", $utf8)
     $w = Invoke-Child "& '$bin\claude-worker.ps1' -PromptFile '$tmp\brief.md' -Cwd '$tmp\work dir' --output-format json --json-schema '{`"a`":`"b c`"}'"
     $o = $w.Out
@@ -104,6 +106,9 @@ public static class Stub {
     Check 'prompt arrives on stdin, accents intact' { $o.Contains("STDIN=h$([char]0xE9)llo `"quoted`" from a file") }
     Check 'inline JSON reaches claude intact'      { $o.Contains('--output-format | json | --json-schema | {"a":"b c"}') }
     Check 'parent environment is untouched'        { $env:CLAUDE_CODE_FAKE -eq 'leak' }
+    Check 'keeps GIT_BASH_PATH and KEEP_ENV names'  { $o.Contains('KEEP=C:\Git\bin\bash.exe/yes') }
+    $ext = Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x --foo -Model haiku bar"
+    Check 'claude options are not bound to ours'   { $ext.Out.Contains('haiku | --append-system-prompt') -and $ext.Out.Contains('| --foo | bar') }
     $null = Invoke-Child "& '$bin\claude-worker.ps1' -Prompt 'caf$([char]0xE9)' -OutFile '$tmp\out.txt'"
     Check '-OutFile writes UTF-8 with accents'     { [IO.File]::ReadAllText("$tmp\out.txt", $utf8).Contains("STDIN=caf$([char]0xE9)") }
     $st = Invoke-Child "& '$bin\claude-worker.ps1' -SelfTest"
@@ -115,7 +120,9 @@ public static class Stub {
     Check 'corrupt key file exits 2'               { (Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x").Code -eq 2 }
     $null = Invoke-Child "& '$bin\set-worker-key.ps1' -Remove"
     Check 'no stored key exits 2'                  { (Invoke-Child "& '$bin\claude-worker.ps1' -Prompt x").Code -eq 2 }
-    foreach ($v in 'CLAUDE_CODE_FAKE', 'ANTHROPIC_BASE_URL', 'CLAUDECODE') { Remove-Item "Env:$v" }
+    foreach ($v in 'CLAUDE_CODE_FAKE', 'ANTHROPIC_BASE_URL', 'CLAUDECODE', 'CLAUDE_CODE_GIT_BASH_PATH', 'CLAUDE_CODE_KEEPME', 'CLAUDE_WORKER_KEEP_ENV') { Remove-Item "Env:$v" }
+    $two = Invoke-Child "& '$ps' -NoProfile -ExecutionPolicy Bypass -File '$bin\find-api-keys.ps1' -Json -Root '$fakeHome\proj,$fakeHome\other'"
+    Check '-Root a,b works through -File'          { $r2 = $two.Out | ConvertFrom-Json; @($r2.scanned.roots).Count -eq 2 -and @($r2.candidates.fingerprint) -contains $fp2 }
 
     # --- install.ps1
     $md = "$fakeHome\.claude\CLAUDE.md"
@@ -131,11 +138,23 @@ public static class Stub {
     Check 'no placeholder left'                    { -not $text.Contains('{{') }
     Check 'rule points at the installed scripts'   { $text.Contains("$fakeHome\.claude\claude-worker\bin\claude-worker.ps1") }
     Check 'scripts are installed'                  { Test-Path "$fakeHome\.claude\claude-worker\bin\claude-worker-lib.ps1" }
-    $u = Invoke-Child "& '$repo\install.ps1' -Uninstall"
+    Check 'backup holds the original file'         { [IO.File]::ReadAllText("$md.bak-claude-api-workers") -eq "# My rules`n`nKeep this.`n" }
+    $i3 = Invoke-Child "& '$fakeHome\.claude\claude-worker\install.ps1'"
+    Check 'reinstall from the installed copy'      { $i3.Code -eq 0 -and ([regex]::Matches([IO.File]::ReadAllText($md), 'claude-api-workers:begin')).Count -eq 1 }
+    $u = Invoke-Child "& '$fakeHome\.claude\claude-worker\install.ps1' -Uninstall"
     $text = [IO.File]::ReadAllText($md)
     Check 'uninstall removes the block'            { $u.Code -eq 0 -and -not $text.Contains('claude-api-workers') }
     Check "uninstall keeps the user's content"     { $text.Contains('Keep this.') }
     Check 'uninstall removes the scripts'          { -not (Test-Path "$fakeHome\.claude\claude-worker") }
+
+    New-Item -ItemType Directory -Force "$tmp\tools" | Out-Null; [IO.File]::WriteAllText("$tmp\tools\keep.txt", 'mine')
+    $null = Invoke-Child "& '$repo\install.ps1' -Prefix '$tmp\tools'"
+    $null = Invoke-Child "& '$repo\install.ps1' -Uninstall -Prefix '$tmp\tools'"
+    Check 'uninstall spares foreign files'         { (Test-Path "$tmp\tools\keep.txt") -and -not (Test-Path "$tmp\tools\bin") }
+
+    [IO.File]::WriteAllText($md, "# Mine`n<!-- claude-api-workers:begin -->`nhalf block`n`nMy later rules.`n")
+    $bad = Invoke-Child "& '$repo\install.ps1'"
+    Check 'unbalanced markers are refused'         { $bad.Code -ne 0 -and [IO.File]::ReadAllText($md).Contains('My later rules.') }
 }
 finally {
     $env:USERPROFILE = $saved.USERPROFILE; $env:PATH = $saved.PATH

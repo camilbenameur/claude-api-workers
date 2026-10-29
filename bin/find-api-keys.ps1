@@ -20,6 +20,8 @@ param(
 . "$PSScriptRoot\claude-worker-lib.ps1"
 
 $homeDir = $env:USERPROFILE
+# powershell -File passes "a,b" as one string: split it ourselves
+$Root = @($Root | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 if (-not $Root) { $Root = @($homeDir) }
 
 $found = [ordered]@{}   # key -> list of places

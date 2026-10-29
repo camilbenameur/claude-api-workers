@@ -12,8 +12,9 @@
 # Exit codes: claude's own code, or 2 bad input / key problem, 3 called from inside a worker,
 # 127 claude not on PATH.
 set -u
-here=$(cd "$(dirname "$0")" && pwd)
-. "$here/claude-worker-lib.sh"
+s=$0; while [ -L "$s" ]; do d=$(cd "$(dirname "$s")" && pwd); s=$(readlink "$s"); case $s in /*) ;; *) s=$d/$s ;; esac; done
+here=$(cd "$(dirname "$s")" && pwd)
+. "$here/claude-worker-lib.sh" || { echo "claude-worker: cannot load claude-worker-lib.sh from $here" >&2; exit 2; }
 
 fail() { _c=$1; shift; printf 'claude-worker: %s\n' "$*" >&2; exit "$_c"; }
 
@@ -52,7 +53,9 @@ fi
 [ -n "$model" ] || model=sonnet
 case $out_file in '' | /* | [A-Za-z]:*) ;; *) out_file=$PWD/$out_file ;; esac
 
-command -v claude >/dev/null 2>&1 || fail 127 "claude not found on PATH (install the Claude Code CLI)"
+claude_bin=$(command -v claude 2>/dev/null) || fail 127 "claude not found on PATH (install the Claude Code CLI)"
+# An absolute path only: a relative one would run whatever "claude" sits in --cwd, with the key
+case $claude_bin in /* | [A-Za-z]:*) ;; *) fail 127 "claude resolves to a relative path ($claude_bin): remove empty or '.' entries from PATH" ;; esac
 
 # Missing or unreadable key = hard stop: without it claude would fall back to the subscription
 key=$(cw_read_key)
@@ -61,9 +64,7 @@ case $key in sk-ant-*) ;; *) fail 2 "stored key empty or invalid: run set-worker
 
 # Drop everything the Claude app passes to its child processes (account, session, API URL),
 # otherwise the worker would authenticate as the subscription instead of the key.
-for v in $(compgen -e); do
-    case $v in CLAUDE_CODE_* | CLAUDE_AGENT_SDK_* | ANTHROPIC_* | CLAUDECODE | CLAUDE_PID) unset "$v" ;; esac
-done
+for v in $(compgen -e); do cw_should_drop "$v" && unset "$v"; done
 export ANTHROPIC_API_KEY="$key" CLAUDE_WORKER=1
 unset key
 [ -n "${CLAUDE_WORKER_BASE_URL:-}" ] && export ANTHROPIC_BASE_URL="$CLAUDE_WORKER_BASE_URL"
@@ -73,7 +74,7 @@ base=(-p --model "$model" --append-system-prompt "$guard")
 
 cd "$cwd" || fail 2 "cannot enter $cwd"
 if [ "$self_test" = 1 ]; then
-    out=$(printf '%s' "$prompt" | claude "${base[@]}" --output-format stream-json --verbose --max-turns 1 2>/dev/null)
+    out=$(printf '%s' "$prompt" | "$claude_bin" "${base[@]}" --output-format stream-json --verbose --max-turns 1 2>/dev/null)
     source=$(printf '%s\n' "$out" | grep -o '"apiKeySource":"[^"]*"' | head -n 1 | cut -d'"' -f4)
     last=$(printf '%s\n' "$out" | grep '"type":"result"' | tail -n 1)
     result=$(printf '%s\n' "$last" | grep -o '"result":"[^"]*"' | head -n 1 | cut -d'"' -f4)
@@ -83,7 +84,8 @@ if [ "$self_test" = 1 ]; then
     exit 1
 fi
 if [ -n "$out_file" ]; then
-    printf '%s' "$prompt" | claude "${base[@]}" ${extra[@]+"${extra[@]}"} > "$out_file"
+    umask 077
+    printf '%s' "$prompt" | "$claude_bin" "${base[@]}" ${extra[@]+"${extra[@]}"} > "$out_file"
 else
-    printf '%s' "$prompt" | claude "${base[@]}" ${extra[@]+"${extra[@]}"}
+    printf '%s' "$prompt" | "$claude_bin" "${base[@]}" ${extra[@]+"${extra[@]}"}
 fi
